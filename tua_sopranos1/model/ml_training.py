@@ -318,7 +318,7 @@ class ConjunctionDatasetGenerator:
 
     # ── Yöntem 3: CelesTrak SOCRATES ─────────────────────────────────────────
 
-    def socrates_fetch(self, limit: int = 200) -> List[dict]:
+    def socrates_fetch(self, limit: int = 0) -> List[dict]:
         """
         Yerel socrates.csv dosyasından conjunction verisi okur.
 
@@ -371,7 +371,9 @@ class ConjunctionDatasetGenerator:
             return []
 
         samples = []
-        for row in rows[:limit]:
+        # limit=0 → tüm satırlar; limit>0 → ilk N satır
+        selected = rows if limit == 0 else rows[:limit]
+        for row in selected:
             try:
                 miss_km = float(row.get("TCA_RANGE", 100.0))
                 rel_vel = float(row.get("TCA_RELATIVE_SPEED", 1.0))
