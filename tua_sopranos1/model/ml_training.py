@@ -320,8 +320,14 @@ class ConjunctionDatasetGenerator:
 
     def socrates_fetch(self, limit: int = 200) -> List[dict]:
         """
-        CelesTrak SOCRATES'ten üst-200 riski çeker.
-        Her conjunction için Pc, TCA, miss distance mevcut.
+        Yerel socrates.csv dosyasından conjunction verisi okur.
+
+        CSV sütunları (CelesTrak SOCRATES formatı):
+          TCA_RANGE          — miss distance (km)
+          TCA_RELATIVE_SPEED — bağıl hız (km/s)
+          MAX_PROB           — çarpışma olasılığı (Pc)
+          OBJECT_NAME_1/2    — nesne adları
+          TCA                — en yakın geçiş zamanı
 
         Jüri Notu:
           SOCRATES NASA CARA ile aynı metodolojiye dayanır.
@@ -334,54 +340,70 @@ class ConjunctionDatasetGenerator:
                 print(f"  [SOCRATES] Cache'ten {len(cached)} kayıt")
                 return cached
 
-        import requests
+        import csv
 
-        url = (
-            "https://celestrak.org/SOCRATES/table-socrates.php"
-            "?NAME=,&ORDER=MAXPROB&MAX=200&FORMAT=json"
-        )
+        # CSV dosyasını birkaç olası konumda ara
+        _here = os.path.dirname(os.path.abspath(__file__))
+        csv_candidates = [
+            os.path.join(_here, "socrates.csv"),                      # model/
+            os.path.join(_here, "..", "socrates.csv"),                 # tua_sopranos1/
+            os.path.join(_here, "..", "..", "socrates.csv"),           # repo kökü
+            "/content/tua_sopranos1/socrates.csv",                     # Colab
+            "/content/repo/socrates.csv",                              # Colab repo kökü
+        ]
+        csv_path = None
+        for p in csv_candidates:
+            if os.path.exists(p):
+                csv_path = os.path.normpath(p)
+                break
+
+        if csv_path is None:
+            print("  [SOCRATES] socrates.csv bulunamadı — atlanıyor")
+            return []
+
+        print(f"  [SOCRATES] {csv_path} okunuyor...")
         try:
-            resp = requests.get(url, timeout=30)
-            if resp.status_code != 200:
-                print(f"  [SOCRATES] HTTP {resp.status_code}")
-                return []
-            raw = resp.json()
+            with open(csv_path, newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
         except Exception as e:
-            print(f"  [SOCRATES] Bağlantı hatası: {e}")
+            print(f"  [SOCRATES] CSV okuma hatası: {e}")
             return []
 
         samples = []
-        for entry in raw[:limit]:
+        for row in rows[:limit]:
             try:
-                miss_km  = float(entry.get("MIN_RNG", 100.0))
-                rel_vel  = float(entry.get("REL_VEL", 1.0))
+                miss_km = float(row.get("TCA_RANGE", 100.0))
+                rel_vel = float(row.get("TCA_RELATIVE_SPEED", 1.0))
+                pc_raw  = row.get("MAX_PROB", None)
 
-                # MAX_PROB doğrudan SOCRATES'ten gelir — compute_pc'ye gerek yok
-                pc_raw   = entry.get("MAX_PROB", entry.get("MAX_PC", None))
                 if pc_raw is not None:
-                    pc    = float(pc_raw)
+                    # "1.000E+00" gibi scientific notation string'i float'a çevir
+                    pc = float(str(pc_raw).replace(" ", ""))
+                    pc = min(pc, 1.0)           # Pc > 1 fiziksel değil
                 else:
                     sigma = max(miss_km * 0.1, 0.05)
-                    hbr_km_tmp = 0.005
                     pc    = float(np.exp(-0.5 * (miss_km * 0.76 / sigma) ** 2)
-                                  * (hbr_km_tmp / sigma) ** 2)
-                label    = self._pc_to_label(pc)
+                                  * (0.005 / sigma) ** 2)
+
+                label  = self._pc_to_label(pc)
+                sigma  = max(miss_km * 0.1, 0.05)
 
                 features = self._extract_features_raw(
                     miss_km, miss_km * 0.5, miss_km * 0.3, miss_km * 0.2,
-                    rel_vel, hbr_km * 1000,
+                    rel_vel, 5.0,
                     sigma**2 * 2, sigma**4,
-                    float(np.linalg.norm(miss_2d)) / max(sigma, 1e-9),
+                    miss_km / max(sigma, 1e-9),
                     35786.0, 1.0, 0, 24.0, 12.0,
-                    cov_2d.tolist()
+                    [[sigma**2, 0], [0, sigma**2]]
                 )
 
                 samples.append({
-                    "features": features.tolist(),
-                    "label":    LABEL_MAP[label],
+                    "features":  features.tolist(),
+                    "label":     LABEL_MAP[label],
                     "label_str": label,
-                    "pc":       pc,
-                    "source":   "SOCRATES",
+                    "pc":        float(pc),
+                    "source":    "SOCRATES",
                 })
             except Exception:
                 continue
