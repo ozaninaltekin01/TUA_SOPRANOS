@@ -50,7 +50,6 @@ from .game_theory import (
 )
 
 from .ml_model import (
-    train_model,
     predict_risk,
     batch_predict,
     hybrid_risk_assessment,
