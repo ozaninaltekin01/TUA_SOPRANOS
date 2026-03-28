@@ -665,17 +665,17 @@ class ConjunctionDatasetGenerator:
             soc = self.socrates_fetch()
             all_samples.extend(soc)
 
-        # Dengeleme
-        if len(all_samples) > 0:
-            all_samples = self._add_synthetic_red_yellow(all_samples)
-
-        # Yeterli örnek yoksa mock ekle
-        if len(all_samples) < target_samples:
-            shortfall = target_samples - len(all_samples)
-            print(f"  [Dataset] {shortfall} mock örnek ekleniyor...")
-            all_samples.extend(self._generate_mock_dataset(n=shortfall))
+        # Gerçek verinin büyük kovaryansları Pc'yi hep GREEN yapar.
+        # Bu nedenle dengeli mock veri her zaman karıştırılır:
+        # hedefin %60'ı dengeli mock, %40'ı gerçek fizik verisi.
+        n_mock = max(int(target_samples * 0.60), target_samples - len(all_samples))
+        print(f"  [Dataset] {n_mock} dengeli mock örnek ekleniyor...")
+        all_samples.extend(self._generate_mock_dataset(n=n_mock))
 
         # Cache'le
+        import random as _random
+        _random.seed(42)
+        _random.shuffle(all_samples)
         save_cache(all_samples[:target_samples], cache_key)
 
         X = np.array([s["features"] for s in all_samples[:target_samples]])
