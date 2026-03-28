@@ -337,8 +337,8 @@ class ConjunctionDatasetGenerator:
         import requests
 
         url = (
-            "https://celestrak.org/SOCRATES/query.php"
-            "?TYPE=SAT&LIMIT=200&DAYS=7&MAX_RANGE=5&FORMAT=json"
+            "https://celestrak.org/SOCRATES/table-socrates.php"
+            "?NAME=,&ORDER=MAXPROB&MAX=200&FORMAT=json"
         )
         try:
             resp = requests.get(url, timeout=30)
@@ -355,14 +355,16 @@ class ConjunctionDatasetGenerator:
             try:
                 miss_km  = float(entry.get("MIN_RNG", 100.0))
                 rel_vel  = float(entry.get("REL_VEL", 1.0))
-                dil_str  = entry.get("TCA", "")
 
-                miss_2d  = np.array([miss_km * 0.7, miss_km * 0.3])
-                sigma    = max(miss_km * 0.1, 0.05)
-                cov_2d   = np.array([[sigma**2, 0], [0, sigma**2]])
-                hbr_km   = 0.005
-
-                pc       = compute_pc(miss_2d, cov_2d, hbr_km)
+                # MAX_PROB doğrudan SOCRATES'ten gelir — compute_pc'ye gerek yok
+                pc_raw   = entry.get("MAX_PROB", entry.get("MAX_PC", None))
+                if pc_raw is not None:
+                    pc    = float(pc_raw)
+                else:
+                    sigma = max(miss_km * 0.1, 0.05)
+                    hbr_km_tmp = 0.005
+                    pc    = float(np.exp(-0.5 * (miss_km * 0.76 / sigma) ** 2)
+                                  * (hbr_km_tmp / sigma) ** 2)
                 label    = self._pc_to_label(pc)
 
                 features = self._extract_features_raw(
