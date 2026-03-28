@@ -27,6 +27,12 @@
     <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="Veri_analizi\config.py" />
+    <Compile Include="Veri_analizi\data_fetch.py" />
+    <Compile Include="Veri_analizi\orbit_calc.py" />
+  </ItemGroup>
+  <ItemGroup>
+    <Folder Include="Veri_analizi\" />
   </ItemGroup>
   <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.Web.targets" />
   <!-- Specify pre- and post-build commands in the BeforeBuild and 
