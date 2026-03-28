@@ -260,13 +260,21 @@ def calculate_distance(pos1, pos2):
     )
 
 
-def find_closest_threats(target_pos, debris_positions, n=10, exclude_turkish=True):
+def find_closest_threats(target_pos, debris_positions, n=10, exclude_turkish=True,
+                         exclude_names=None):
     """Hedef uyduya en yakın n tehdidi bulur"""
+    _excl = set(n.upper() for n in (exclude_names or []))
     threats = []
     for deb in debris_positions:
         if exclude_turkish and deb.get("country") == "TUR":
             continue
+        # Uyduyu kendi adıyla eşleştirmeyi engelle (örn. TURKSAT 1B vs TURKSAT 1B)
+        if deb.get("name", "").upper() in _excl:
+            continue
+        # Mesafe sıfırsa (aynı nesne) atla
         dist = calculate_distance(target_pos, deb)
+        if dist < 0.001:
+            continue
         threats.append({
             "name": deb["name"],
             "norad_id": deb["norad_id"],

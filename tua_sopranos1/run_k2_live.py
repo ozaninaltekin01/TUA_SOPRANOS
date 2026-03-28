@@ -152,7 +152,8 @@ for sat_name, sat_pos in tr_positions.items():
     orbit = turkish[sat_name]["orbit"]
     debris_pool = geo_positions if orbit == "GEO" else leo_positions
     
-    threats = find_closest_threats(sat_pos, debris_pool, n=5)
+    threats = find_closest_threats(sat_pos, debris_pool, n=5,
+                                    exclude_names=[sat_name])
     
     # K2 önceliklendirme
     prioritized = prioritize_threats(threats)
