@@ -30,6 +30,7 @@
     <Compile Include="Veri_analizi\config.py" />
     <Compile Include="Veri_analizi\data_fetch.py" />
     <Compile Include="Veri_analizi\orbit_calc.py" />
+    <Compile Include="Veri_analizi\threat_analysis.py" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="Veri_analizi\" />
