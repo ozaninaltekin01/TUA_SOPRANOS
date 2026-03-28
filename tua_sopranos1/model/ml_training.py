@@ -545,57 +545,74 @@ class ConjunctionDatasetGenerator:
     def _add_synthetic_red_yellow(
         self,
         samples: List[dict],
-        target_red:    int = 200,
-        target_yellow: int = 500,
+        target_red:    int = 300,
+        target_yellow: int = 600,
     ) -> List[dict]:
         """
-        Gerçek veriden RED/YELLOW sınıfları çok azsa,
-        fizik parametrelerini sıkıştırarak yeni örnekler üretir.
+        RED/YELLOW örnekleri yetersizse dengeli veri üretir.
 
-        Bu saf rastgele değil — gerçek örneklerin 'perturbasyon'udur.
+        Seed örnek yoksa bile çalışır — doğrudan fizik parametrelerinden
+        üretir. Seed varsa pertürbasyon (±%5 gürültü) kullanır.
         """
-        rng     = np.random.RandomState(42)
+        rng     = np.random.RandomState(99)
         reds    = [s for s in samples if s["label_str"] == "RED"]
         yellows = [s for s in samples if s["label_str"] == "YELLOW"]
-
         new_samples: List[dict] = []
 
-        def perturb(base_feats, scale=0.05):
-            arr  = np.array(base_feats)
-            noise = rng.normal(0, scale, arr.shape)
-            return np.clip(arr * (1 + noise), 0, None).tolist()
+        def _make_sample(miss_km, sigma, hbr_m, rng_obj):
+            hbr_km  = hbr_m / 1000
+            miss_2d = np.array([miss_km * 0.7, miss_km * 0.3])
+            cov_2d  = np.array([[sigma**2, 0], [0, sigma**2]])
+            pc      = compute_pc(miss_2d, cov_2d, hbr_km)
+            label   = ConjunctionDatasetGenerator._pc_to_label(pc)
+            mahal   = miss_km / max(sigma, 1e-9)
+            alt     = float(rng_obj.choice([35786.0, rng_obj.uniform(300, 1200)]))
+            rel_vel = rng_obj.uniform(0.01, 15.0)
+            return {
+                "features": [
+                    miss_km, miss_km*0.5, miss_km*0.3, miss_km*0.2,
+                    rel_vel, mahal, hbr_m, alt,
+                    rng_obj.uniform(0.1, 5.0), float(rng_obj.randint(0, 4)),
+                    2*sigma**2, sigma**4,
+                    rng_obj.uniform(1, 168), rng_obj.uniform(1, 72),
+                    miss_km / max(hbr_km, 1e-9),
+                    rng_obj.uniform(0, 180), sigma*1.41,
+                    (rel_vel**2) / (2*max(miss_km, 1e-9)),
+                ],
+                "label": LABEL_MAP[label], "label_str": label,
+                "pc": float(pc), "source": "augmented",
+            }
 
-        # RED augmentasyon
-        while len(reds) + len(new_samples) < target_red and reds:
-            base  = rng.choice(reds)
-            feats = perturb(base["features"], scale=0.02)
-            # miss_distance düşür
-            feats[0] = max(feats[0] * rng.uniform(0.3, 0.7), 0.01)
-            miss_2d  = np.array([feats[0] * 0.7, feats[0] * 0.3])
-            sigma    = max(np.sqrt(feats[10] / 2), 0.05)
-            cov_2d   = np.array([[sigma**2, 0], [0, sigma**2]])
-            pc       = compute_pc(miss_2d, cov_2d, feats[6] / 1000)
-            label    = ConjunctionDatasetGenerator._pc_to_label(pc)
-            new_samples.append({
-                "features": feats, "label": LABEL_MAP[label],
-                "label_str": label, "pc": float(pc), "source": "augmented",
-            })
+        # RED — seed varsa pertürbe et, yoksa doğrudan üret
+        n_existing_red = len(reds)
+        while n_existing_red + len(new_samples) < target_red:
+            if reds:
+                base      = rng.choice(reds)
+                miss_km   = max(base["features"][0] * rng.uniform(0.5, 1.5), 0.001)
+                sigma     = max(np.sqrt(base["features"][10] / 2), 0.05)
+                hbr_m     = base["features"][6]
+                # RED garantisi: miss çok küçük tut
+                miss_km   = min(miss_km, 0.04)
+            else:
+                miss_km = rng.uniform(0.001, 0.04)
+                sigma   = rng.uniform(0.05, 0.15)
+                hbr_m   = rng.uniform(8.0, 15.0)
+            new_samples.append(_make_sample(miss_km, sigma, hbr_m, rng))
 
-        # YELLOW augmentasyon
-        all_near = reds + yellows
-        while len(yellows) + len(new_samples) < target_yellow and all_near:
-            base  = rng.choice(all_near)
-            feats = perturb(base["features"], scale=0.1)
-            feats[0] = max(feats[0] * rng.uniform(0.5, 2.0), 0.05)
-            miss_2d  = np.array([feats[0] * 0.7, feats[0] * 0.3])
-            sigma    = max(np.sqrt(feats[10] / 2), 0.05)
-            cov_2d   = np.array([[sigma**2, 0], [0, sigma**2]])
-            pc       = compute_pc(miss_2d, cov_2d, feats[6] / 1000)
-            label    = ConjunctionDatasetGenerator._pc_to_label(pc)
-            new_samples.append({
-                "features": feats, "label": LABEL_MAP[label],
-                "label_str": label, "pc": float(pc), "source": "augmented",
-            })
+        # YELLOW
+        n_existing_yel = len(yellows)
+        while n_existing_yel + len(new_samples) - (target_red - n_existing_red) < target_yellow:
+            if yellows or reds:
+                seed    = rng.choice(yellows if yellows else reds)
+                miss_km = max(seed["features"][0] * rng.uniform(0.8, 2.0), 0.04)
+                sigma   = max(np.sqrt(seed["features"][10] / 2), 0.05)
+                hbr_m   = seed["features"][6]
+                miss_km = np.clip(miss_km, 0.04, 0.20)
+            else:
+                miss_km = rng.uniform(0.04, 0.20)
+                sigma   = rng.uniform(0.05, 0.15)
+                hbr_m   = rng.uniform(5.0, 10.0)
+            new_samples.append(_make_sample(miss_km, sigma, hbr_m, rng))
 
         return samples + new_samples
 
@@ -675,59 +692,84 @@ class ConjunctionDatasetGenerator:
 
     def _generate_mock_dataset(self, n: int = 1000) -> List[dict]:
         """
-        K1 yokken gerçekçi fizik parametrelerle mock veri üretir.
-        Etiketler yine gerçek Pc formülünden gelir.
+        Dengeli sınıf dağılımıyla fiziksel olarak tutarlı mock veri üretir.
+
+        Pc üstel düştüğü için tamamen rastgele parametreler neredeyse
+        hep GREEN üretir. Bu fonksiyon her sınıf için ayrı fiziksel
+        parametre aralıkları kullanarak ~25% RED, ~30% YELLOW, ~45% GREEN
+        dağılımı garantiler. Etiketler yine gerçek Pc formülünden gelir.
         """
-        rng     = np.random.RandomState(42)
+        rng = np.random.RandomState(42)
         samples = []
 
-        for _ in range(n):
-            # Fiziksel olarak makul parametreler
-            miss_km   = rng.uniform(0.05, 400.0)
-            rel_vel   = rng.uniform(0.01, 15.0)
-            sigma     = rng.uniform(0.05, 5.0)
-            hbr_m     = rng.uniform(1.0, 10.0)
-            altitude  = rng.choice([35786.0, rng.uniform(300, 1200)])
-            rcs_m2    = rng.uniform(0.01, 10.0)
-            sec_type  = rng.randint(0, 4)
-            tca_hours = rng.uniform(1, 168)
-            tle_age   = rng.uniform(1, 72)
+        # Pc = exp(-|miss|²/2σ²) * (hbr/σ)²  — yaklaşık
+        # RED    (Pc>1e-4) : miss << sigma, hbr büyük
+        # YELLOW (Pc>1e-5) : miss ~  sigma
+        # GREEN  (Pc<1e-5) : miss >> sigma
+        n_red    = int(n * 0.25)
+        n_yellow = int(n * 0.30)
+        n_green  = n - n_red - n_yellow
 
-            radial    = miss_km * rng.uniform(0.3, 0.7)
-            intrack   = miss_km * rng.uniform(0.2, 0.5)
-            crosstrack = miss_km * rng.uniform(0.1, 0.3)
+        # Pc = (hbr/σ)² · exp(−mahal²/2)  →  mahal = miss/σ
+        # hbr/σ = 0.05 (örn. hbr=5m, σ=100m) için:
+        #   RED    (Pc>1e-4)  : mahal < 2.5
+        #   YELLOW (Pc>1e-5)  : 2.5 < mahal < 3.3
+        #   GREEN  (Pc<1e-5)  : mahal > 3.3
+        # miss_km = mahal * sigma şeklinde türetilir.
+        class_configs = [
+            # (count, mahal_range,   sigma_range,   hbr_m_range)
+            (n_red,    (0.01, 2.40), (0.05, 0.30),  (6.0, 15.0)),
+            (n_yellow, (2.50, 3.30), (0.05, 0.30),  (5.0, 10.0)),
+            (n_green,  (5.0,  80.0), (0.05,  5.0),  (1.0,  5.0)),
+        ]
 
-            cov_trace = 2 * sigma**2
-            cov_det   = sigma**4
-            mahalanobis = miss_km / max(sigma, 1e-9)
-            hbr_km    = hbr_m / 1000
-            miss_2d   = np.array([miss_km * 0.7, miss_km * 0.3])
-            cov_2d    = np.array([[sigma**2, 0], [0, sigma**2]])
+        for count, mahal_range, sigma_range, hbr_range in class_configs:
+            for _ in range(count):
+                mahal      = rng.uniform(*mahal_range)
+                sigma      = rng.uniform(*sigma_range)
+                hbr_m      = rng.uniform(*hbr_range)
+                miss_km    = mahal * sigma   # fiziksel tutarlılık garantisi
+                rel_vel    = rng.uniform(0.01, 15.0)
+                altitude   = float(rng.choice([35786.0, rng.uniform(300, 1200)]))
+                rcs_m2     = rng.uniform(0.01, 10.0)
+                sec_type   = rng.randint(0, 4)
+                tca_hours  = rng.uniform(1, 168)
+                tle_age    = rng.uniform(1, 72)
 
-            pc        = compute_pc(miss_2d, cov_2d, hbr_km)
-            label     = self._pc_to_label(pc)
+                radial     = miss_km * rng.uniform(0.3, 0.7)
+                intrack    = miss_km * rng.uniform(0.2, 0.5)
+                crosstrack = miss_km * rng.uniform(0.1, 0.3)
 
-            miss_to_hbr  = miss_km / max(hbr_km, 1e-9)
-            v_angle      = rng.uniform(0, 180)
-            c_sigma      = sigma * np.sqrt(2)
-            energy       = (rel_vel**2) / (2 * max(miss_km, 1e-9))
+                cov_trace   = 2 * sigma**2
+                cov_det     = sigma**4
+                hbr_km      = hbr_m / 1000
+                miss_2d     = np.array([miss_km * 0.7, miss_km * 0.3])
+                cov_2d      = np.array([[sigma**2, 0], [0, sigma**2]])
+                mahalanobis = mahal  # miss_km / sigma
 
-            features = [
-                miss_km, radial, intrack, crosstrack,
-                rel_vel, mahalanobis, hbr_m, altitude,
-                rcs_m2, float(sec_type), cov_trace, cov_det,
-                tca_hours, tle_age, miss_to_hbr,
-                v_angle, c_sigma, energy,
-            ]
+                pc    = compute_pc(miss_2d, cov_2d, hbr_km)
+                label = self._pc_to_label(pc)
 
-            samples.append({
-                "features":  features,
-                "label":     LABEL_MAP[label],
-                "label_str": label,
-                "pc":        float(pc),
-                "source":    "mock",
-            })
+                miss_to_hbr = miss_km / max(hbr_km, 1e-9)
+                v_angle     = rng.uniform(0, 180)
+                c_sigma     = sigma * np.sqrt(2)
+                energy      = (rel_vel**2) / (2 * max(miss_km, 1e-9))
 
+                samples.append({
+                    "features": [
+                        miss_km, radial, intrack, crosstrack,
+                        rel_vel, mahalanobis, hbr_m, altitude,
+                        rcs_m2, float(sec_type), cov_trace, cov_det,
+                        tca_hours, tle_age, miss_to_hbr,
+                        v_angle, c_sigma, energy,
+                    ],
+                    "label":     LABEL_MAP[label],
+                    "label_str": label,
+                    "pc":        float(pc),
+                    "source":    "mock",
+                })
+
+        rng.shuffle(samples)
         return samples
 
 
