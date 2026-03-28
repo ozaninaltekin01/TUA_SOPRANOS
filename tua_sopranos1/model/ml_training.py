@@ -1121,7 +1121,8 @@ def train_lstm(
     val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False)
 
     # ── Model ────────────────────────────────────────────────────────────────
-    device = torch.device("cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"  [LSTM] Cihaz: {device}")
     model  = LSTMOrbitModel().to(device)
     optim  = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
     sched  = torch.optim.lr_scheduler.ReduceLROnPlateau(
