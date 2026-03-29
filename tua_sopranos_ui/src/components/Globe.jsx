@@ -94,8 +94,8 @@ export default function Globe({ allSatellites, selectedSat, demoMode, onGlobeRea
     ctrl.enableTranslate = false   // pan'i kapat, globe merkezli hissettir
     ctrl.inertiaRotate   = 0.90    // kayma inertia (0=yok, 1=sonsuz)
     ctrl.inertiaZoom     = 0.80
-    ctrl.minimumZoomDistance = 200_000      // 200 km — cogu zaman yeterli
-    ctrl.maximumZoomDistance = 120_000_000  // 120,000 km — GEO halkasi icin yeterli
+    ctrl.minimumZoomDistance = 200_000      // 200 km
+    ctrl.maximumZoomDistance = 150_000_000  // 150,000 km — GEO tam halka gorunumu icin
 
     // Baslangic: Turkiye uzerinde orta zoom
     viewer.camera.setView({
@@ -322,15 +322,19 @@ export default function Globe({ allSatellites, selectedSat, demoMode, onGlobeRea
     // LEO: Uydu irtifasinin ~3000 km ustunden — orbit yayini net goster.
     //
     if (isGeo) {
+      // Kamera ekvator uzerinde, tam asagiya bakiyor.
+      // Bu sekilde Dunya merkezdedir, GEO halkasi etrafini saran tam bir daire
+      // olarak gorunur ve uydu halkanin uzerinde parlak bir nokta olarak belirir.
+      // lat=0 + pitch=-89: Dunya ve halka tam ortalanmis gorunur.
       viewer.camera.flyTo({
         destination: Cesium.Cartesian3.fromDegrees(
-          pos.lon,   // ayni boylamdan bak
-          30,        // kuzeyden hafif perspektif
-          70_000_000 // GEO halkasinin uzerinde (halka ~36,000 km)
+          pos.lon, // Uydunun boylaminda dur (halka uzerinde uydu gorunur)
+          0,       // Ekvatorda — tam asagiya bakinca Dunya ortalanir
+          100_000_000 // 100,000 km — GEO halkasi (36,000 km) tam gorunur
         ),
         orientation: {
           heading: Cesium.Math.toRadians(0),
-          pitch:   Cesium.Math.toRadians(-50),
+          pitch:   Cesium.Math.toRadians(-89), // Neredeyse tam asagiya
           roll:    0,
         },
         duration:       2.5,
