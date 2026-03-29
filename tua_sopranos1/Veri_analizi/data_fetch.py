@@ -260,13 +260,21 @@ def calculate_distance(pos1, pos2):
     )
 
 
-def find_closest_threats(target_pos, debris_positions, n=10, exclude_turkish=True):
+def find_closest_threats(target_pos, debris_positions, n=10, exclude_turkish=True,
+                         exclude_names=None):
     """Hedef uyduya en yakın n tehdidi bulur"""
+    _excl = set(n.upper() for n in (exclude_names or []))
     threats = []
     for deb in debris_positions:
         if exclude_turkish and deb.get("country") == "TUR":
             continue
+        # Uyduyu kendi adıyla eşleştirmeyi engelle (örn. TURKSAT 1B vs TURKSAT 1B)
+        if deb.get("name", "").upper() in _excl:
+            continue
+        # Mesafe sıfırsa (aynı nesne) atla
         dist = calculate_distance(target_pos, deb)
+        if dist < 0.001:
+            continue
         threats.append({
             "name": deb["name"],
             "norad_id": deb["norad_id"],
@@ -283,8 +291,124 @@ def find_closest_threats(target_pos, debris_positions, n=10, exclude_turkish=Tru
 
 
 # ============================================
-# 9. CACHE SİSTEMİ (demo güvenliği)
+# 9. YÖRÜNGE YOLU HESAPLAMA (UI için)
 # ============================================
+
+def _gmst_rad(jd_full):
+    """
+    Greenwich Mean Sidereal Time (radyan) — Julian Date'ten hesaplar.
+
+    Kaynak: IAU 1982 GMST formülü.
+    jd_full = jd + fr  (sgp4.api.jday'in döndürdüğü iki değerin toplamı)
+    """
+    T = (jd_full - 2451545.0) / 36525.0
+    gmst_deg = (280.46061837
+                + 360.98564736629 * (jd_full - 2451545.0)
+                + 0.000387933 * T ** 2
+                - T ** 3 / 38710000.0)
+    return np.radians(gmst_deg % 360.0)
+
+
+def get_orbit_path(tle_data, hours_ahead=24, n_points=200):
+    """
+    SGP4 ile bir nesnenin yörünge yolunu hesaplar.
+
+    Şu andan itibaren hours_ahead saate kadar n_points eşit aralıklı
+    nokta üretir. Her nokta ECI koordinatlarından coğrafi koordinata
+    (lat/lon/alt) dönüştürülür — 3D dünya üzerinde yörünge çizmek için
+    hazır formattır.
+
+    Args:
+        tle_data : dict — "line1" ve "line2" anahtarlarını içerir
+                   (calculate_position ile aynı format)
+        hours_ahead : int/float — kaç saat ilerisi hesaplansın
+                      LEO için 2h (1-2 tur), GEO için 24h (1 tam tur)
+        n_points    : int — yörünge eğrisindeki nokta sayısı
+                      200 → akıcı eğri, 50 → hafif/hızlı
+
+    Returns:
+        list[dict]:
+            lat       — enlem (derece, -90..90)
+            lon       — boylam (derece, -180..180)
+            alt_km    — yükseklik km cinsinden
+            timestamp — ISO-8601 UTC string
+            eci       — [x, y, z] km (Three.js / CesiumJS için)
+
+        Hata durumunda boş liste döner.
+    """
+    try:
+        sat = Satrec.twoline2rv(tle_data["line1"], tle_data["line2"])
+    except Exception:
+        return []
+
+    now = datetime.datetime.utcnow()
+    # n_points-1 aralık → ilk ve son nokta dahil
+    step_sec = (hours_ahead * 3600.0) / max(n_points - 1, 1)
+
+    points = []
+    for i in range(n_points):
+        dt = now + datetime.timedelta(seconds=i * step_sec)
+        jd, fr = jday(dt.year, dt.month, dt.day,
+                      dt.hour, dt.minute, dt.second)
+
+        e, r, v = sat.sgp4(jd, fr)
+
+        # SGP4 hata kodu veya NaN → noktayı atla
+        if e != 0 or any(np.isnan(x) for x in r):
+            continue
+
+        # ECI → ECEF  (GMST açısıyla döndür)
+        gmst  = _gmst_rad(jd + fr)
+        cos_g = np.cos(gmst)
+        sin_g = np.sin(gmst)
+
+        x_ecef =  r[0] * cos_g + r[1] * sin_g
+        y_ecef = -r[0] * sin_g + r[1] * cos_g
+        z_ecef =  r[2]
+
+        # ECEF → lat / lon / alt  (küresel Dünya yaklaşımı — görselleştirme için yeterli)
+        r_mag = np.sqrt(x_ecef ** 2 + y_ecef ** 2 + z_ecef ** 2)
+        if r_mag < 1.0:          # Dünya'nın içi → geçersiz
+            continue
+
+        lat = np.degrees(np.arcsin(np.clip(z_ecef / r_mag, -1.0, 1.0)))
+        lon = np.degrees(np.arctan2(y_ecef, x_ecef))
+        alt = r_mag - EARTH_RADIUS_KM
+
+        points.append({
+            "lat":       round(lat,  4),
+            "lon":       round(lon,  4),
+            "alt_km":    round(alt,  2),
+            "timestamp": dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "eci":       [round(r[0], 3), round(r[1], 3), round(r[2], 3)],
+        })
+
+    return points
+
+
+def get_orbit_paths_batch(objects, hours_ahead=24, n_points=200):
+    """
+    Birden fazla nesne için toplu yörünge yolu hesabı.
+
+    Args:
+        objects : list[dict] veya dict[str, dict]
+                  Her eleman "line1" + "line2" içermeli.
+                  dict[str,dict] verilirse key=isim olarak kullanılır.
+
+    Returns:
+        dict[str, list[dict]]  isim → yörünge noktaları listesi
+    """
+    if isinstance(objects, dict):
+        items = objects.items()
+    else:
+        items = ((obj.get("object_name", obj.get("name", str(i))), obj)
+                 for i, obj in enumerate(objects))
+
+    return {
+        name: get_orbit_path(obj, hours_ahead=hours_ahead, n_points=n_points)
+        for name, obj in items
+    }
+
 
 def save_cache(data, filename):
     """Veriyi JSON olarak cache'le"""

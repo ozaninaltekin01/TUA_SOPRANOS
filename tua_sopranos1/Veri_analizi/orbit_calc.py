@@ -67,14 +67,18 @@ def transform_covariance_to_ric(cov_eci, rotation_matrix):
 # ============================================
 
 def compute_tca(line1_p, line2_p, line1_s, line2_s,
-                hours_ahead=24, step_minutes=1):
+                hours_ahead=24, step_minutes=1, fine_step_seconds=None):
     """
     İki nesnenin en yakın geçiş zamanını (TCA) ve
     o andaki mesafeyi hesaplar.
-    
+
     İki aşamalı arama:
     1. Kaba tarama (step_minutes aralıklarla)
-    2. İnce tarama (en yakın noktanın ±step etrafında 6 saniyelik adımlarla)
+    2. İnce tarama (±1 dakika etrafında)
+       - LEO (fine_step_seconds=1): 7.5 km/s hız → 1 sn = 7.5 km hassasiyet
+       - GEO (fine_step_seconds=6): 3 km/s hız → 6 sn = 18 km hassasiyet
+
+    fine_step_seconds=None → otomatik belirlenir (LEO için 1, diğerleri için 6)
     """
     sat_p = Satrec.twoline2rv(line1_p, line2_p)
     sat_s = Satrec.twoline2rv(line1_s, line2_s)
@@ -107,10 +111,15 @@ def compute_tca(line1_p, line2_p, line1_s, line2_s,
             tca_r_p, tca_v_p = list(r_p), list(v_p)
             tca_r_s, tca_v_s = list(r_s), list(v_s)
 
-    # --- Aşama 2: İnce tarama (±1 dakika, 6 saniye adım) ---
+    # --- Aşama 2: İnce tarama (±1 dakika) ---
+    # LEO'da 7.5 km/s hız → 6 sn adımda 45 km atlayabilir, 1 sn kullan
+    # GEO'da 3 km/s hız → 6 sn yeterli
+    if fine_step_seconds is None:
+        speeds = [np.linalg.norm(tca_v_p), np.linalg.norm(tca_v_s)]
+        fine_step_seconds = 1 if max(speeds) > 5.0 else 6
     fine_start = max(0, best_minute - 1)
     fine_end = best_minute + 1
-    for second in range(fine_start * 60, fine_end * 60, 6):
+    for second in range(fine_start * 60, fine_end * 60, fine_step_seconds):
         t = now + datetime.timedelta(seconds=second)
         jd, fr = jday(t.year, t.month, t.day, t.hour, t.minute, t.second)
 

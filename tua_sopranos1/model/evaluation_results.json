@@ -1,0 +1,100 @@
+{
+  "generated_at": "2026-03-28T21:36:45.681482",
+  "xgboost": {
+    "n_test_samples": 1000,
+    "accuracy": 0.939,
+    "confusion_matrix": [
+      [
+        690,
+        42,
+        0
+      ],
+      [
+        19,
+        217,
+        0
+      ],
+      [
+        0,
+        0,
+        32
+      ]
+    ],
+    "confusion_matrix_labels": [
+      "GREEN",
+      "YELLOW",
+      "RED"
+    ],
+    "classification_report_str": "              precision    recall  f1-score   support\n\n       GREEN       0.97      0.94      0.96       732\n      YELLOW       0.84      0.92      0.88       236\n         RED       1.00      1.00      1.00        32\n\n    accuracy                           0.94      1000\n   macro avg       0.94      0.95      0.94      1000\nweighted avg       0.94      0.94      0.94      1000\n",
+    "classification_report": {
+      "GREEN": {
+        "precision": 0.9732016925246827,
+        "recall": 0.9426229508196722,
+        "f1-score": 0.9576682859125607,
+        "support": 732.0
+      },
+      "YELLOW": {
+        "precision": 0.8378378378378378,
+        "recall": 0.9194915254237288,
+        "f1-score": 0.8767676767676768,
+        "support": 236.0
+      },
+      "RED": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1-score": 1.0,
+        "support": 32.0
+      },
+      "accuracy": 0.939,
+      "macro avg": {
+        "precision": 0.9370131767875068,
+        "recall": 0.9540381587478004,
+        "f1-score": 0.9448119875600791,
+        "support": 1000.0
+      },
+      "weighted avg": {
+        "precision": 0.9421133686577975,
+        "recall": 0.939,
+        "f1-score": 0.9399303570051663,
+        "support": 1000.0
+      }
+    },
+    "roc_auc_macro": 0.9910432919187274,
+    "roc_auc_per_class": {
+      "GREEN": 0.9871340021205449,
+      "YELLOW": 0.9859958736356376,
+      "RED": 1.0
+    },
+    "pr_auc_per_class": {
+      "GREEN": 0.9953217605818623,
+      "YELLOW": 0.9591596158150422,
+      "RED": 1.0
+    },
+    "label_distribution": {
+      "GREEN": 732,
+      "YELLOW": 236,
+      "RED": 32
+    },
+    "feature_importance_plot": "/content/tua_sopranos1/model/feature_importance.png"
+  },
+  "lstm": {
+    "mae_km": {},
+    "rmse_km": {},
+    "max_err_km": {},
+    "sgp4_mae_km": {},
+    "sgp4_rmse_km": {},
+    "improvement_pct": {},
+    "mean_improvement_pct": 0.0,
+    "summary": "LSTM, SGP4'e kıyasla ortalama %0.0 daha doğru yörünge tahmini yapıyor"
+  },
+  "summary": {
+    "xgboost_accuracy": 93.9,
+    "xgboost_roc_auc": 0.991,
+    "lstm_mean_improvement": 0.0,
+    "models_ready": {
+      "xgboost": true,
+      "lstm": true
+    },
+    "pipeline_status": "operational"
+  }
+}

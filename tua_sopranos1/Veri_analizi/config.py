@@ -52,3 +52,22 @@ COVARIANCE_PARAMS = {
 # Fiziksel Sabitler
 EARTH_RADIUS_KM = 6371.0
 GEO_ALTITUDE_KM = 35786.0
+
+# Uydu bazlı operasyonel parametreler
+# Yakıt tahminleri: fırlatma yılı + tip + kütleden hesaplanmış
+# mission_years_remaining: günümüzden itibaren beklenen görev süresi
+SATELLITE_OPERATIONS = {
+    "Turksat 3A":  {"fuel_kg": 80,   "mission_years_remaining": 3},
+    "Turksat 4A":  {"fuel_kg": 150,  "mission_years_remaining": 8},
+    "Turksat 4B":  {"fuel_kg": 160,  "mission_years_remaining": 9},
+    "Turksat 5A":  {"fuel_kg": 280,  "mission_years_remaining": 11},
+    "Turksat 5B":  {"fuel_kg": 300,  "mission_years_remaining": 11},
+    "Turksat 6A":  {"fuel_kg": 350,  "mission_years_remaining": 14},
+    "Gokturk-1":   {"fuel_kg": 50,   "mission_years_remaining": 3},
+    "Gokturk-2":   {"fuel_kg": 30,   "mission_years_remaining": 2},
+    "IMECE":       {"fuel_kg": 60,   "mission_years_remaining": 3},
+    "Turksat 3U":  {"fuel_kg": 0.5,  "mission_years_remaining": 1},
+    "Turksat 1B":  {"fuel_kg": 0,    "mission_years_remaining": 0},  # emekli
+    "Turksat 1C":  {"fuel_kg": 0,    "mission_years_remaining": 0},  # emekli
+    "Turksat 2A":  {"fuel_kg": 0,    "mission_years_remaining": 0},  # emekli
+}
