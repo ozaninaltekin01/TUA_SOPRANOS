@@ -213,8 +213,8 @@ export default function Globe({ allSatellites, selectedSat, demoMode, onGlobeRea
         id:       'sel-orbit-sgp4',
         polyline: {
           positions:  orbitPositions,
-          width:      isGeo ? 1.5 : 2,
-          material:   glowMaterial(ORBIT_LINE_COLORS.sgp4.withAlpha(isGeo ? 0.5 : 0.9), 0.15),
+          width:      isGeo ? 2.5 : 2,
+          material:   glowMaterial(ORBIT_LINE_COLORS.sgp4.withAlpha(isGeo ? 0.85 : 0.9), isGeo ? 0.25 : 0.15),
           arcType:    Cesium.ArcType.NONE,
         },
       })
@@ -322,21 +322,33 @@ export default function Globe({ allSatellites, selectedSat, demoMode, onGlobeRea
     // LEO: Uydu irtifasinin ~3000 km ustunden — orbit yayini net goster.
     //
     if (isGeo) {
-      // Kamera ekvator uzerinde, tam asagiya bakiyor.
-      // Bu sekilde Dunya merkezdedir, GEO halkasi etrafini saran tam bir daire
-      // olarak gorunur ve uydu halkanin uzerinde parlak bir nokta olarak belirir.
-      // lat=0 + pitch=-89: Dunya ve halka tam ortalanmis gorunur.
+      // lat=0 kamerasi halkayi KENAR KENAR (ince cizgi) gosterir.
+      // Duzeltme: kamerayi 55 derece kuzeye al, Dunya merkezine dogru bak.
+      // Bu sekilde GEO halkasi elips olarak gorunur (Saturn halkalari gibi).
+      //
+      // heading/pitch yerine direction+up kullan — ekvatorda heading/pitch
+      // unreliable olur (gimbal lock benzeri). direction/up her zaman calisir.
+      const camPos = Cesium.Cartesian3.fromDegrees(pos.lon, 55, 85_000_000)
+
+      // Kamera → Dunya merkezi yonu
+      const dir = Cesium.Cartesian3.normalize(
+        Cesium.Cartesian3.subtract(Cesium.Cartesian3.ZERO, camPos, new Cesium.Cartesian3()),
+        new Cesium.Cartesian3()
+      )
+      // "Yukari" yonu: Kuzey Kutbu yonunu referans al
+      const northPole = new Cesium.Cartesian3(0, 0, 1)
+      const right = Cesium.Cartesian3.normalize(
+        Cesium.Cartesian3.cross(dir, northPole, new Cesium.Cartesian3()),
+        new Cesium.Cartesian3()
+      )
+      const up = Cesium.Cartesian3.normalize(
+        Cesium.Cartesian3.cross(right, dir, new Cesium.Cartesian3()),
+        new Cesium.Cartesian3()
+      )
+
       viewer.camera.flyTo({
-        destination: Cesium.Cartesian3.fromDegrees(
-          pos.lon, // Uydunun boylaminda dur (halka uzerinde uydu gorunur)
-          0,       // Ekvatorda — tam asagiya bakinca Dunya ortalanir
-          100_000_000 // 100,000 km — GEO halkasi (36,000 km) tam gorunur
-        ),
-        orientation: {
-          heading: Cesium.Math.toRadians(0),
-          pitch:   Cesium.Math.toRadians(-89), // Neredeyse tam asagiya
-          roll:    0,
-        },
+        destination: camPos,
+        orientation: { direction: dir, up },
         duration:       2.5,
         easingFunction: Cesium.EasingFunction.CUBIC_IN_OUT,
       })
