@@ -569,6 +569,219 @@ def _sgp4_propagate(
     return np.array(results)
 
 
+def predict_conjunction_threats(
+    sat_name:             str,
+    tle_data:             dict,
+    candidate_objects:    list,
+    hours_ahead:          int   = 24,
+    step_hours:           float = 0.5,
+    max_threats:          int   = 20,
+    distance_threshold_km: float = 200.0,
+) -> dict:
+    """
+    Tahmin edilen yörünge üzerinden yaklaşan tehditleri tespit eder ve sınıflandırır.
+
+    Yöntem:
+      1. Birincil uyduyu SGP4 ile hours_ahead kadar ilerlet  (N adım)
+      2. Her aday nesneyi aynı zaman penceresinde ilerlet
+      3. Her adımda ECI mesafesi hesapla  → minimum = TCA tahmini
+      4. distance_threshold_km altındakileri classify_approach_distance ile etiketle
+      5. RED / YELLOW için CARA Pc hesapla (yaklaşık kovaryans)
+      6. XGBoost ile hızlı risk taraması yap
+      7. Mesafeye göre sırala, max_threats kadar döndür
+
+    Args:
+        sat_name              : Birincil uydu adı
+        tle_data              : {'line1': ..., 'line2': ...}
+        candidate_objects     : [{'name': ..., 'line1': ..., 'line2': ...}, ...]
+        hours_ahead           : Tahmin penceresi (saat)
+        step_hours            : Zaman adımı (saat) — 0.5 h = 30 dk önerilir
+        max_threats           : Döndürülecek maksimum tehdit sayısı
+        distance_threshold_km : Bu mesafe altındakiler raporlanır
+
+    Returns:
+        {
+          "sat_name": str,
+          "prediction_hours": int,
+          "step_hours": float,
+          "threats": [...],   # mesafeye göre sıralı tehdit listesi
+          "summary": {"RED": n, "YELLOW": n, "WATCH": n, "GREEN": n, "total": n}
+        }
+    """
+    if not HAS_SGP4:
+        return {"error": "sgp4 kütüphanesi bulunamadı", "threats": []}
+
+    line1 = tle_data.get("line1", "")
+    line2 = tle_data.get("line2", "")
+    if not line1 or not line2:
+        return {"error": "TLE verisi eksik", "threats": []}
+
+    now = datetime.datetime.utcnow()
+
+    # ── Birincil uydu yörüngesi ───────────────────────────────────────────────
+    primary_traj = _sgp4_propagate(line1, line2, now, hours_ahead, step_hours)
+    primary_pos  = primary_traj[:, :3]   # (N, 3) km  ECI
+    primary_vel  = primary_traj[:, 3:]   # (N, 3) km/s ECI
+    n_steps      = len(primary_pos)
+
+    # Birincil uydu irtifası (ilk adımdan) — LEO / GEO tespiti
+    r0   = float(np.linalg.norm(primary_pos[0]))
+    alt0 = r0 - _EARTH_RADIUS_KM
+    orbit_type = "GEO" if alt0 > 10_000 else "LEO"
+
+    threats     = []
+    model_data  = load_model()   # XGBoost — None if not available
+
+    for obj in candidate_objects:
+        obj_name  = obj.get("name", "UNKNOWN")
+        obj_line1 = obj.get("line1", "")
+        obj_line2 = obj.get("line2", "")
+
+        if not obj_line1 or not obj_line2:
+            continue
+
+        # Aday nesnenin yörüngesi
+        try:
+            cand_traj = _sgp4_propagate(obj_line1, obj_line2, now,
+                                         hours_ahead, step_hours)
+        except Exception:
+            continue
+
+        cand_pos = cand_traj[:, :3]
+        cand_vel = cand_traj[:, 3:]
+
+        # Adım adım ECI mesafesi — (N,) vektör
+        diff      = primary_pos - cand_pos            # (N, 3)
+        distances = np.linalg.norm(diff, axis=1)      # (N,)
+
+        # Sıfır-hata satırlarını filtrele (SGP4 error → [0,0,0])
+        valid_mask = (np.linalg.norm(primary_pos, axis=1) > 100) & \
+                     (np.linalg.norm(cand_pos,    axis=1) > 100)
+        if not np.any(valid_mask):
+            continue
+
+        distances[~valid_mask] = np.inf
+        tca_idx    = int(np.argmin(distances))
+        min_dist   = float(distances[tca_idx])
+
+        if min_dist > distance_threshold_km or np.isinf(min_dist):
+            continue
+
+        # TCA zamanı
+        tca_dt          = now + datetime.timedelta(hours=tca_idx * step_hours)
+        tca_hours_from_now = tca_idx * step_hours
+
+        # Göreceli hız TCA anında
+        rel_vel_vec = primary_vel[tca_idx] - cand_vel[tca_idx]
+        rel_vel_kms = float(np.linalg.norm(rel_vel_vec))
+
+        # İrtifa & orbit tipi (TCA anında)
+        r_tca      = float(np.linalg.norm(primary_pos[tca_idx]))
+        alt_tca    = r_tca - _EARTH_RADIUS_KM
+        ot_tca     = "GEO" if alt_tca > 10_000 else "LEO"
+
+        # ── Sınıflandırma ────────────────────────────────────────────────────
+        classification = classify_approach_distance(min_dist, ot_tca)
+
+        # ── TCA konumları → lat/lon/alt ───────────────────────────────────────
+        primary_latlon = _eci_to_latlon_path(
+            [primary_pos[tca_idx].tolist()], tca_dt, step_hours
+        )
+        threat_latlon  = _eci_to_latlon_path(
+            [cand_pos[tca_idx].tolist()], tca_dt, step_hours
+        )
+
+        primary_point = primary_latlon[0] if primary_latlon else {}
+        threat_point  = threat_latlon[0]  if threat_latlon  else {}
+
+        # ── Encounter frame vektörleri (CARA + XGBoost için ortak) ──────────────
+        miss_vec = diff[tca_idx]
+        r_hat    = primary_pos[tca_idx] / max(r_tca, 1e-9)
+        v_norm   = max(float(np.linalg.norm(primary_vel[tca_idx])), 1e-9)
+        v_hat    = primary_vel[tca_idx] / v_norm
+        c_hat    = np.cross(r_hat, v_hat)
+        c_norm   = max(float(np.linalg.norm(c_hat)), 1e-9)
+        c_hat    = c_hat / c_norm
+
+        # ── CARA Pc (yaklaşık) — sadece RED/YELLOW ───────────────────────────
+        cara_result = None
+        if classification["run_cara"]:
+            try:
+                miss_r  = float(np.dot(miss_vec, r_hat))
+                miss_c  = float(np.dot(miss_vec, c_hat))
+                miss_2d = [miss_r, miss_c]
+
+                sigma_km = 0.1   # varsayılan konumsal belirsizlik
+                cov_2d   = [[sigma_km**2, 0.0], [0.0, sigma_km**2]]
+                hbr_km   = 0.01  # 10 m HBR
+
+                pc = compute_pc(miss_2d, cov_2d, hbr_km)
+                cara_result = assess_cara_status(pc)
+            except Exception as ce:
+                cara_result = {"error": str(ce)}
+
+        # ── XGBoost hızlı risk taraması ───────────────────────────────────────
+        xgb_risk = None
+        if model_data is not None:
+            try:
+                conj_data = {
+                    "min_distance_km":        min_dist,
+                    "radial_km":              abs(float(np.dot(miss_vec, r_hat))),
+                    "intrack_km":             abs(float(np.dot(miss_vec, v_hat))),
+                    "crosstrack_km":          abs(float(np.dot(miss_vec, c_hat))),
+                    "relative_speed_kms":     rel_vel_kms,
+                    "primary_pos_tca":        primary_pos[tca_idx].tolist(),
+                    "time_to_tca_hours":      tca_hours_from_now,
+                    "tle_age_hours":          12.0,
+                    "combined_hbr_m":         10.0,
+                    "secondary_rcs_m2":       1.0,
+                    "secondary_type_encoded": 0,
+                    "combined_covariance_2d": [[0.01, 0], [0, 0.01]],
+                    "velocity_angle_deg":     90.0,
+                }
+                xgb_result = predict_risk(conj_data, model_data)
+                xgb_risk   = xgb_result.get("risk_level", "UNKNOWN")
+            except Exception:
+                xgb_risk = None
+
+        threats.append({
+            "object_name":          obj_name,
+            "min_distance_km":      round(min_dist, 3),
+            "tca_timestamp":        tca_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "tca_hours_from_now":   round(tca_hours_from_now, 2),
+            "orbit_type":           ot_tca,
+            "altitude_km":          round(alt_tca, 1),
+            "relative_velocity_kms": round(rel_vel_kms, 3),
+            "classification":       classification,
+            "primary_position":     primary_point,
+            "threat_position":      threat_point,
+            "cara_result":          cara_result,
+            "xgb_risk":             xgb_risk,
+        })
+
+    # Mesafeye göre sırala
+    threats.sort(key=lambda t: t["min_distance_km"])
+    threats = threats[:max_threats]
+
+    # Özet sayaçlar
+    summary = {"RED": 0, "YELLOW": 0, "WATCH": 0, "GREEN": 0, "total": len(threats)}
+    for t in threats:
+        lbl = t["classification"]["label"]
+        if lbl in summary:
+            summary[lbl] += 1
+
+    return {
+        "sat_name":         sat_name,
+        "orbit_type":       orbit_type,
+        "prediction_hours": hours_ahead,
+        "step_hours":       step_hours,
+        "n_candidates":     len(candidate_objects),
+        "threats":          threats,
+        "summary":          summary,
+        "generated_at":     now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
 def predict_orbit(
     sat_name:    str,
     tle_data:    dict,

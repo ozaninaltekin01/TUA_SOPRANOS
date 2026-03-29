@@ -11,6 +11,7 @@ Kullanım (K3 için):
     from model.threat_analysis import detect_ghost_maneuver, fragmentation_warning
     from model.ml_model      import predict_risk, hybrid_risk_assessment
     from model.ml_model      import load_lstm_model, predict_orbit, hybrid_full_pipeline
+    from model.ml_model      import predict_conjunction_threats, classify_approach_distance
     from model.ml_training   import run_training
     from model.model_evaluation import run_full_evaluation, quick_sanity_check
 """
@@ -68,6 +69,7 @@ from .ml_model import (
     hybrid_full_pipeline,
     # UI yardımcıları
     classify_approach_distance,
+    predict_conjunction_threats,
 )
 
 from .model_evaluation import (
