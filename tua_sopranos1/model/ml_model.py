@@ -398,6 +398,144 @@ def load_lstm_model(
     return _cached_lstm_model, _cached_lstm_scaler
 
 
+_EARTH_RADIUS_KM = 6371.0
+
+
+def _eci_to_latlon_path(
+    eci_positions: list,
+    start_dt: datetime.datetime,
+    step_hours: float,
+) -> list:
+    """
+    ECI [x, y, z] km dizisini coğrafi [lat, lon, alt_km] listesine çevirir.
+
+    Her adım için GMST açısı hesaplanır ve ECI → ECEF → lat/lon/alt
+    dönüşümü yapılır. Sonuç doğrudan Three.js / CesiumJS'e beslenebilir.
+
+    Args:
+        eci_positions : [[x,y,z], ...] — ECI km, predict_orbit çıktısıyla aynı format
+        start_dt      : ilk noktanın UTC zamanı
+        step_hours    : ardışık noktalar arası saat farkı
+
+    Returns:
+        [{"lat": float, "lon": float, "alt_km": float, "timestamp": str}, ...]
+    """
+    path = []
+    for i, pos in enumerate(eci_positions):
+        x, y, z = float(pos[0]), float(pos[1]), float(pos[2])
+
+        # Dünya merkezinden uzaklık sıfırsa geçersiz (SGP4 hata satırı)
+        if x == 0.0 and y == 0.0 and z == 0.0:
+            continue
+
+        dt = start_dt + datetime.timedelta(hours=i * step_hours)
+        jd, fr = jday(dt.year, dt.month, dt.day,
+                      dt.hour, dt.minute, dt.second)
+
+        # IAU 1982 GMST (derece → radyan)
+        jd_full  = jd + fr
+        T        = (jd_full - 2451545.0) / 36525.0
+        gmst_deg = (280.46061837
+                    + 360.98564736629 * (jd_full - 2451545.0)
+                    + 0.000387933 * T ** 2
+                    - T ** 3 / 38710000.0)
+        gmst = np.radians(gmst_deg % 360.0)
+
+        # ECI → ECEF
+        cos_g  = np.cos(gmst)
+        sin_g  = np.sin(gmst)
+        x_ecef =  x * cos_g + y * sin_g
+        y_ecef = -x * sin_g + y * cos_g
+        z_ecef =  z
+
+        # ECEF → lat / lon / alt  (küresel yaklaşım — görselleştirme için yeterli)
+        r_mag = np.sqrt(x_ecef ** 2 + y_ecef ** 2 + z_ecef ** 2)
+        if r_mag < 1.0:          # Dünya içi → geçersiz
+            continue
+
+        lat = np.degrees(np.arcsin(np.clip(z_ecef / r_mag, -1.0, 1.0)))
+        lon = np.degrees(np.arctan2(y_ecef, x_ecef))
+        alt = r_mag - _EARTH_RADIUS_KM
+
+        path.append({
+            "lat":       round(lat, 4),
+            "lon":       round(lon, 4),
+            "alt_km":    round(alt,  2),
+            "timestamp": dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
+
+    return path
+
+
+def classify_approach_distance(distance_km: float, orbit_type: str = "LEO") -> dict:
+    """
+    Tahmin edilen en yakın geçiş mesafesine göre tehlike seviyesi atar.
+
+    Thresholdlar NASA CARA operasyonel deneyimine dayanır:
+      Pc = (hbr/σ)² · exp(−(miss/σ)²/2)
+      Tipik LEO: σ ≈ 0.3 km, HBR ≈ 0.005 km → RED altında miss < ~1 km
+      Tipik GEO: σ ≈ 2.0 km, HBR ≈ 0.005 km → RED altında miss < ~10 km
+
+    ┌─────────┬──────────────────┬──────────────────┐
+    │  Label  │   LEO (km)       │   GEO (km)       │
+    ├─────────┼──────────────────┼──────────────────┤
+    │ 🔴 RED  │    < 1           │    < 10          │
+    │ 🟡 YELLOW│  1 – 10         │  10 – 100        │
+    │ 👁 WATCH │ 10 – 50         │ 100 – 200        │
+    │ 🟢 GREEN │   > 50          │   > 200          │
+    └─────────┴──────────────────┴──────────────────┘
+
+    WATCH: CARA hesabı gerekmez ama UI'da göster.
+    GREEN: UI'da gösterme, sadece sistem logu.
+
+    Returns:
+        dict:
+            label        — "RED" | "YELLOW" | "WATCH" | "GREEN"
+            color        — hex renk kodu
+            show_in_ui   — bool (GREEN → False)
+            run_cara     — bool (RED/YELLOW → True)
+            description  — Türkçe açıklama
+            distance_km  — girdi mesafesi
+    """
+    d = distance_km
+
+    if orbit_type == "GEO":
+        if d < 10:
+            label, color, show, cara = "RED",    "#FF3333", True,  True
+            desc = "Acil — CARA Pc > 1e-4 bekleniyor, manevra değerlendir"
+        elif d < 100:
+            label, color, show, cara = "YELLOW", "#FFA500", True,  True
+            desc = "İzle — CARA Pc > 1e-5 bekleniyor, plan hazırla"
+        elif d < 200:
+            label, color, show, cara = "WATCH",  "#FFFF33", True,  False
+            desc = "Takipte — rutin izleme yeterli"
+        else:
+            label, color, show, cara = "GREEN",  "#33FF33", False, False
+            desc = "Güvenli"
+    else:  # LEO ve diğerleri
+        if d < 1:
+            label, color, show, cara = "RED",    "#FF3333", True,  True
+            desc = "Acil — CARA Pc > 1e-4 bekleniyor, manevra değerlendir"
+        elif d < 10:
+            label, color, show, cara = "YELLOW", "#FFA500", True,  True
+            desc = "İzle — CARA Pc > 1e-5 bekleniyor, plan hazırla"
+        elif d < 50:
+            label, color, show, cara = "WATCH",  "#FFFF33", True,  False
+            desc = "Takipte — rutin izleme yeterli"
+        else:
+            label, color, show, cara = "GREEN",  "#33FF33", False, False
+            desc = "Güvenli"
+
+    return {
+        "label":       label,
+        "color":       color,
+        "show_in_ui":  show,
+        "run_cara":    cara,
+        "description": desc,
+        "distance_km": round(d, 3),
+    }
+
+
 def _sgp4_propagate(
     line1: str,
     line2: str,
@@ -483,12 +621,19 @@ def predict_orbit(
         "correction_applied": False,
     }
 
+    # ── SGP4 lat/lon yolu — her zaman hesaplanır ──────────────────────────────
+    if HAS_SGP4:
+        result["sgp4_path"] = _eci_to_latlon_path(
+            result["sgp4_positions"], now, step_hours
+        )
+
     # ── LSTM artık düzeltmesi ─────────────────────────────────────────────────
     lstm_model, scalers = load_lstm_model()
 
     if lstm_model is None or scalers is None:
         result["lstm_positions"] = result["sgp4_positions"]
         result["note"] = "LSTM yok — saf SGP4 kullanıldı"
+        result["lstm_path"] = result.get("sgp4_path", [])
         return result
 
     try:
@@ -496,6 +641,7 @@ def predict_orbit(
         if len(sgp4_traj) < LSTM_SEQ_IN:
             result["lstm_positions"] = result["sgp4_positions"]
             result["note"] = "Yetersiz giriş verisi"
+            result["lstm_path"] = result.get("sgp4_path", [])
             return result
 
         # Giriş: [x, y, z, vx, vy, vz, bstar]
@@ -537,6 +683,12 @@ def predict_orbit(
     except Exception as e:
         result["lstm_positions"] = result["sgp4_positions"]
         result["lstm_error"]     = str(e)
+
+    # ── LSTM lat/lon yolu ────────────────────────────────────────────────────
+    if HAS_SGP4:
+        result["lstm_path"] = _eci_to_latlon_path(
+            result["lstm_positions"], now, step_hours
+        )
 
     return result
 

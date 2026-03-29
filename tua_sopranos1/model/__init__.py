@@ -66,6 +66,8 @@ from .ml_model import (
     compare_with_sgp4,
     # End-to-end
     hybrid_full_pipeline,
+    # UI yardımcıları
+    classify_approach_distance,
 )
 
 from .model_evaluation import (
