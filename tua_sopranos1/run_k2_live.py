@@ -37,7 +37,10 @@ print("=" * 65)
 print("\n📦 Modül kontrolü...")
 
 try:
-    from Veri_analizi.config import TURKISH_SATELLITES, CARA_THRESHOLDS as K1_THRESHOLDS
+    from Veri_analizi.config import (
+        TURKISH_SATELLITES, CARA_THRESHOLDS as K1_THRESHOLDS,
+        SATELLITE_OPERATIONS,
+    )
     print("  ✅ Veri_analizi.config")
 except ImportError as e:
     print(f"  ❌ Veri_analizi.config — {e}")
@@ -80,7 +83,25 @@ except ImportError as e:
     print(f"  ❌ model — {e}")
     sys.exit(1)
 
+try:
+    from model.ml_model import predict_risk, load_model
+    from model.model_evaluation import quick_sanity_check
+    _xgb_model_data = load_model()
+    print("  ✅ model.ml_model (XGBoost)")
+except Exception:
+    _xgb_model_data = None
+    print("  ⚠️  model.ml_model — XGBoost yüklenemedi (screening devre dışı)")
+
 print("\n  Tüm modüller yüklendi!")
+
+# ── Model sağlık kontrolü ──────────────────────────────────────────────────
+if _xgb_model_data is not None:
+    try:
+        sc = quick_sanity_check()
+        xgb_status = "✅" if sc["xgboost_ok"] else "⚠️ "
+        print(f"  {xgb_status} XGBoost sanity: {sc['details'].get('xgboost', 'ok')}")
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -168,7 +189,51 @@ for sat_name, sat_pos in tr_positions.items():
 
 
 # ============================================================
+# ADIM 3.5: XGBOOST HIZLI SCREENING (K2)
+# Tüm üst tehditleri milisaniyeler içinde sınıflandır.
+# Sadece YELLOW/RED çıkanlar tam CARA Pc hesabına geçer.
+# ============================================================
+
+xgb_verdicts = {}   # sat_name → {"threat_name": verdict}
+
+if _xgb_model_data is not None:
+    print(f"\n{'=' * 65}")
+    print("  ADIM 3.5: XGBOOST HIZLI SCREENING")
+    print(f"{'=' * 65}")
+
+    for sat_name, threats in all_threats.items():
+        if not threats:
+            continue
+        orbit = turkish[sat_name]["orbit"]
+        xgb_verdicts[sat_name] = {}
+
+        for threat in threats:
+            # Hızlı özellik çıkarımı — tam TCA olmadan
+            quick_conj = {
+                "min_distance_km":      threat["distance_km"],
+                "relative_speed_kms":   threat.get("rel_vel", 7.5 if orbit == "LEO" else 0.5),
+                "secondary_rcs_m2":     {"LARGE": 10.0, "MEDIUM": 1.0, "SMALL": 0.1}.get(
+                                            threat.get("rcs_size", "MEDIUM"), 1.0),
+                "time_to_tca_hours":    12.0 if orbit == "LEO" else 24.0,
+                "tle_age_hours":        12.0,
+            }
+            result = predict_risk(quick_conj, _xgb_model_data)
+            xgb_verdicts[sat_name][threat["name"]] = result
+
+        top = threats[0]
+        v   = xgb_verdicts[sat_name].get(top["name"], {})
+        icon = {"RED": "🔴", "YELLOW": "🟡", "GREEN": "🟢"}.get(
+            v.get("predicted_class", "?"), "⚪")
+        print(f"  {sat_name:<16} → {top['name']:<25} "
+              f"{icon} {v.get('predicted_class','?'):6}  "
+              f"güven=%{v.get('confidence_pct', 0):.0f}")
+else:
+    print("\n  ⚠️  ADIM 3.5 atlandı — XGBoost modeli yok")
+
+
+# ============================================================
 # ADIM 4: CONJUNCTION ANALİZİ (K1) + CARA Pc (K2)
+# XGBoost GREEN derse tam CARA atlanır; YELLOW/RED ise hesaplanır.
 # ============================================================
 
 print(f"\n{'=' * 65}")
@@ -188,8 +253,17 @@ for sat_name, threats in all_threats.items():
         "rcs_size": turkish[sat_name].get("rcs_size", "LARGE"),
     }
     
-    # En yakın tehdit ile conjunction analizi
-    threat = threats[0]  # en öncelikli tehdit
+    # XGBoost GREEN diyorsa ve başka YELLOW/RED tehdit yoksa atla
+    sat_verdicts = xgb_verdicts.get(sat_name, {})
+    non_green = [t for t in threats
+                 if sat_verdicts.get(t["name"], {}).get("predicted_class", "GREEN") != "GREEN"]
+    threat = non_green[0] if non_green else threats[0]  # en öncelikli tehdit
+
+    # XGBoost GREEN ve model aktifse uyar ama yine de hesapla (doğrulama için)
+    if _xgb_model_data and not non_green:
+        xgb_conf = sat_verdicts.get(threat["name"], {}).get("confidence_pct", 0)
+        print(f"\n  ✅ {sat_name}: XGBoost GREEN (%{xgb_conf:.0f}) — "
+              f"CARA doğrulaması yapılıyor...")
     
     # Tehdidin TLE'sini bul
     debris_list = geo_debris if orbit == "GEO" else leo_debris
@@ -275,14 +349,17 @@ if cara_results:
     print(f"     CARA: {worst_data['cara']['cara_status']}")
     
     # Manevra önerisi
-    mass = turkish[worst_name].get("mass_kg", 4229)
+    mass  = turkish[worst_name].get("mass_kg", 4229)
     orbit = turkish[worst_name]["orbit"]
-    
+    ops   = SATELLITE_OPERATIONS.get(worst_name, {"fuel_kg": 100, "mission_years_remaining": 5})
+    fuel_kg      = ops["fuel_kg"]
+    mission_yrs  = ops["mission_years_remaining"]
+
     maneuver_result = suggest_maneuver(
         conjunction_data=worst_data["conjunction"],
         spacecraft_mass_kg=mass,
-        fuel_remaining_kg=200,        # tahmini
-        mission_remaining_years=12,   # tahmini
+        fuel_remaining_kg=fuel_kg,
+        mission_remaining_years=mission_yrs,
         orbit_type=orbit
     )
     
@@ -313,7 +390,7 @@ if cara_results:
     
     game = who_should_dodge(
         pc=worst_data["cara"]["pc"],
-        fuel_remaining_primary_kg=200,
+        fuel_remaining_primary_kg=fuel_kg,
         fuel_remaining_secondary_kg=0 if is_debris else 50,
         fuel_cost_primary_kg=maneuver_result["recommended"]["fuel_mass_kg"],
         fuel_cost_secondary_kg=0 if is_debris else 0.8,
@@ -343,9 +420,9 @@ if cara_results:
     print(f"{'=' * 65}")
     
     budget = fuel_budget_manager(
-        fuel_remaining_kg=200,
-        mission_remaining_years=12,
-        annual_conjunctions=10,
+        fuel_remaining_kg=fuel_kg,
+        mission_remaining_years=mission_yrs,
+        annual_conjunctions=15 if orbit == "LEO" else 5,
         orbit_type=orbit
     )
     
