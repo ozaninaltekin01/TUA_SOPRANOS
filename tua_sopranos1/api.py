@@ -22,6 +22,7 @@ Endpoints:
 
 import sys
 import os
+import math
 import datetime
 import threading
 import time
@@ -36,6 +37,7 @@ sys.path.insert(0, os.path.join(_BASE, "Veri_analizi"))
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 # ── Kendi modulumuz ───────────────────────────────────────────────────────────
 from ui_data_generator import generate_ui_data
@@ -359,6 +361,209 @@ def get_info():
                            if _CACHE["generated"] else None,
         },
     }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ENDPOINT: MANEVRA SİMÜLASYONU  (Türksat 6A senaryo hesaplayıcı)
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── Fizik sabitleri ───────────────────────────────────────────────────────────
+_G0              = 9.80665        # standart yer çekimi ivmesi  [m/s²]
+_ISP_SEC         = 220.0          # hidrazin mono-prop Isp       [s]
+_THRUST_N        = 10.0           # tipik GEO durum itki gücü    [N]
+_HYDRAZINE_USD   = 15_500         # uçuş onaylı hidrazin maliyeti [$/kg]
+
+# Manevra tipi başına kilometre kazancı ölçekleme katsayısı:
+#   improvement_km ≈ delta_v_ms × tca_hours × scale
+# Prograde / Retrograde en verimli (boylamsal ayrışma).
+# Radyal daha az etkili. Çift-impuls kısmi iptal nedeniyle orta.
+_TYPE_SCALE = {
+    "Prograde":     13.5,
+    "Retrograde":   13.5,
+    "Radial Out":    8.0,
+    "Radial In":     7.5,
+    "Bi-Impulsive":  5.5,
+}
+
+# Manevra tipi başına görev ömrü darbesi çarpanı:
+#   impact_days = fuel_kg × 15 × multiplier
+_TYPE_LIFE_MULT = {
+    "Prograde":    1.00,
+    "Retrograde":  1.00,
+    "Radial Out":  1.00,
+    "Radial In":   1.00,
+    "Bi-Impulsive": 0.35,   # dönüş yanımı yakıtı geri kazanır
+}
+
+
+class ManeuverRequest(BaseModel):
+    """POST /api/simulate_maneuver için istek modeli."""
+    sat_name:                str            # ör. "Turksat 6A"
+    scenario_id:             str            # ör. "micro_nudge"
+    maneuver_type:           str            # "Prograde" | "Retrograde" | "Radial Out" | "Bi-Impulsive"
+    delta_v_ms:              float          # Δv büyüklüğü  [m/s]
+    tca_hours:               float = 18.0  # TCA'ya kalan süre  [saat]
+    original_miss_distance_km: float = 0.3 # mevcut minimum mesafe  [km]
+    initial_pc:              float = 1.83e-4  # mevcut çarpışma olasılığı
+
+
+def _simulate_maneuver_physics(
+    sat_name:                str,
+    maneuver_type:           str,
+    delta_v_ms:              float,
+    tca_hours:               float,
+    original_miss_km:        float,
+    initial_pc:              float,
+    cached_data:             dict,
+) -> dict:
+    """
+    Tsiolkovsky roketi denklemi ve basitleştirilmiş yörünge yaklaşımlarını
+    kullanarak manevra metriklerini hesaplar.
+
+    Hesaplanan değerler:
+        burn_duration_sec   — Tsiolkovsky'den kütle akışı ile
+        fuel_mass_kg        — Tsiolkovsky'den
+        fuel_efficiency_pct — Δv büyüklüğüne bağlı ampirik
+        new_miss_distance   — lineer zamanla ayrışma yaklaşımı
+        pc_after            — üstel ölçekli azalma modeli
+        status_after        — Pc eşiklerine göre
+        mission_life_impact — yakıt oranı × görev ömrü
+        fuel_remaining_pct  — toplam kapasiteden
+        fuel_cost_usd       — kg başına hidrazin fiyatı
+        recommended         — en verimli (kg başına max km/kg)
+    """
+
+    # ── 1. Uydu parametrelerini önbellekten al ─────────────────────────────
+    sat_info   = {}
+    name_lower = sat_name.lower()
+    for s in cached_data.get("satellites", []):
+        if s.get("name", "").lower() == name_lower:
+            sat_info = s
+            break
+
+    # Kütleye dayalı geri dönüşler (varsayılanlar Türksat 6A için makul)
+    dry_mass_kg     = sat_info.get("mass_kg", 3500.0)
+    current_fuel_kg = sat_info.get("fuel_kg", 890.0)
+
+    # Toplam kapasite: yakıt oranı ~%35 (tipik GEO başlangıç kütlesi)
+    fuel_capacity_kg = dry_mass_kg * 0.35
+    fuel_capacity_kg = max(fuel_capacity_kg, current_fuel_kg + 10.0)
+
+    # Toplam ıslak kütle (yakıt dahil)
+    wet_mass_kg = dry_mass_kg + current_fuel_kg
+
+    # ── 2. Tsiolkovsky roketi denklemi — yakıt kütlesi ────────────────────
+    # m_prop = m_wet × (1 − exp(−|Δv| / (Isp × g0)))
+    effective_exhaust_velocity = _ISP_SEC * _G0          # m/s
+    mass_ratio  = 1.0 - math.exp(-delta_v_ms / effective_exhaust_velocity)
+    fuel_mass_kg = wet_mass_kg * mass_ratio
+
+    # ── 3. Yanma süresi — kütle akışından ─────────────────────────────────
+    # ṁ = F / (Isp × g0)    [kg/s]
+    mass_flow_rate   = _THRUST_N / effective_exhaust_velocity   # kg/s
+    burn_duration_sec = fuel_mass_kg / mass_flow_rate            # s
+
+    # ── 4. Yanma verimliliği — ampirik ────────────────────────────────────
+    # Büyük Δv'ler daha uzun, daha az verimli yanma gerektirir.
+    # 0 m/s → %98, 1 m/s → ~%78, minimum %72
+    fuel_efficiency_pct = max(72.0, round(98.0 - delta_v_ms * 20.0, 1))
+
+    # ── 5. Yeni ıska mesafesi — lineer ayrışma yaklaşımı ──────────────────
+    # improvement_km ≈ Δv [m/s] × TCA [saat] × tip_katsayısı
+    scale = _TYPE_SCALE.get(maneuver_type, 10.0)
+    improvement_km       = delta_v_ms * tca_hours * scale
+    new_miss_distance_km = original_miss_km + improvement_km
+
+    # ── 6. Manevra sonrası çarpışma olasılığı ─────────────────────────────
+    # Üstel ölçek: Pc_sonra = Pc_başlangıç × exp(−d_yeni / σ)
+    # σ ≈ 2 km (GEO için tipik birleşik kovaryans sigma değeri)
+    sigma_km = 2.0
+    pc_after_float = initial_pc * math.exp(-new_miss_distance_km / sigma_km)
+    pc_after_float = max(pc_after_float, 1e-14)   # sayısal alt sınır
+
+    # Bilimsel gösterim dizisi
+    pc_after_str = f"{pc_after_float:.2e}"
+    if pc_after_float < 1e-12:
+        pc_after_str = f"< 1e-12"
+
+    # ── 7. Manevra sonrası durum eşikleri ─────────────────────────────────
+    if pc_after_float < 1e-6:
+        status_after = "GREEN"
+    elif pc_after_float < 1e-4:
+        status_after = "YELLOW"
+    else:
+        status_after = "RED"
+
+    # ── 8. Görev ömrü etkisi ──────────────────────────────────────────────
+    # impact_days = yakıt_kg × 15 × tip_çarpanı
+    life_mult          = _TYPE_LIFE_MULT.get(maneuver_type, 1.0)
+    mission_life_impact_days = max(1, round(fuel_mass_kg * 15.0 * life_mult))
+
+    # ── 9. Kalan yakıt yüzdesi — toplam kapasiteden ───────────────────────
+    fuel_after_burn    = max(0.0, current_fuel_kg - fuel_mass_kg)
+    fuel_remaining_pct = round((fuel_after_burn / fuel_capacity_kg) * 100.0, 1)
+
+    # ── 10. USD maliyet ───────────────────────────────────────────────────
+    fuel_cost_usd = round(fuel_mass_kg * _HYDRAZINE_USD)
+
+    # ── 11. Önerilen senaryo mu? ──────────────────────────────────────────
+    # En iyi senaryo = kilogram başına en yüksek ıska kazancı VE TCA > 12 saat
+    km_per_kg   = improvement_km / max(fuel_mass_kg, 1e-9)
+    recommended = (delta_v_ms <= 0.08) and (tca_hours >= 12.0) and (km_per_kg > 50.0)
+
+    return {
+        "sat_name":               sat_name,
+        "scenario_id":            None,       # çağıran tarafından doldurulur
+        "type":                   maneuver_type,
+        "delta_v_ms":             round(delta_v_ms, 4),
+        "burn_duration_sec":      round(burn_duration_sec, 1),
+        "fuel_mass_kg":           round(fuel_mass_kg, 4),
+        "isp_sec":                _ISP_SEC,
+        "fuel_efficiency_pct":    fuel_efficiency_pct,
+        "new_miss_distance_km":   round(new_miss_distance_km, 2),
+        "miss_improvement_km":    round(improvement_km, 2),
+        "pc_after":               pc_after_str,
+        "pc_after_float":         pc_after_float,
+        "status_after":           status_after,
+        "mission_life_impact_days": mission_life_impact_days,
+        "fuel_remaining_pct":     fuel_remaining_pct,
+        "fuel_cost_usd":          fuel_cost_usd,
+        "recommended":            recommended,
+        # meta — hata ayıklama / şeffaflık için
+        "_wet_mass_kg":           round(wet_mass_kg, 1),
+        "_fuel_capacity_kg":      round(fuel_capacity_kg, 1),
+        "_current_fuel_kg":       round(current_fuel_kg, 1),
+        "_km_per_kg":             round(km_per_kg, 2),
+    }
+
+
+@app.post("/api/simulate_maneuver", tags=["Maneuver"])
+def simulate_maneuver(req: ManeuverRequest, background_tasks: BackgroundTasks):
+    """
+    Seçili uydu ve manevra senaryosu için fizik tabanlı manevra simülasyonu.
+
+    Girdi:
+        sat_name, scenario_id, maneuver_type, delta_v_ms,
+        tca_hours, original_miss_distance_km, initial_pc
+
+    Çıktı:
+        Tsiolkovsky yakıt kütlesi, yanma süresi, ıska kazancı,
+        Pc sonrası, durum etiketi, USD maliyeti, yakıt çubuğu %
+    """
+    # Uydu kütlesini ve yakıt miktarını çözmek için önbelleklenmiş veriyi kullan
+    cached = _get_cached_data(background_tasks)
+
+    result = _simulate_maneuver_physics(
+        sat_name              = req.sat_name,
+        maneuver_type         = req.maneuver_type,
+        delta_v_ms            = req.delta_v_ms,
+        tca_hours             = req.tca_hours,
+        original_miss_km      = req.original_miss_distance_km,
+        initial_pc            = req.initial_pc,
+        cached_data           = cached,
+    )
+    result["scenario_id"] = req.scenario_id
+    return result
 
 
 # ═════════════════════════════════════════════════════════════════════════════

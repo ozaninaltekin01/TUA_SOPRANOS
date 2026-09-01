@@ -1,245 +1,267 @@
-# TUA SOPRANOS
-### Türk Uydu Güvenlik ve Çarpışma Önleme Sistemi
+# 🛰️ TUA SOPRANOS
+### Türk Uydu Çarpışma Risk Analizi ve Önleme Sistemi
 
-Türkiye'nin yörüngede bulunan uydularını çöp ve diğer uzay nesnelerinden korumak için geliştirilmiş yapay zeka destekli bir çarpışma riski analiz sistemidir.
-
----
-
-## Proje Özeti
-
-TUA SOPRANOS, gerçek zamanlı TLE verilerini Space-Track API üzerinden çekerek SGP4 yörünge propagasyonu, NASA CARA Pc hesabı, XGBoost risk sınıflandırması ve LSTM yörünge düzeltmesiyle Türk uydularını sürekli izler. Tehdit tespit edildiğinde oyun teorisi tabanlı manevra kararı üretir ve CCSDS 508.0 uyumlu CDM dosyası oluşturur.
+> **TUA SOPRANOS** — Türkiye'nin aktif uydularını uzay enkazı ve diğer cisimlerden kaynaklanan çarpışma tehlikelerine karşı gerçek zamanlı izleyen, makine öğrenmesi destekli bir orbital güvenlik platformudur.
 
 ---
 
-## İzlenen Uydular
+## 📌 Proje Özeti
 
-| Uydu | NORAD | Yörünge | Tip | Kütle |
-|------|-------|---------|-----|-------|
-| Turksat 3A | 33056 | GEO | Haberleşme | 3117 kg |
-| Turksat 4A | 39522 | GEO | Haberleşme | 4869 kg |
-| Turksat 4B | 40984 | GEO | Haberleşme | 4860 kg |
-| Turksat 5A | 47306 | GEO | Haberleşme | 3500 kg |
-| Turksat 5B | 50212 | GEO | Haberleşme | 4500 kg |
-| Turksat 6A | 60233 | GEO | Haberleşme | 4229 kg |
-| Göktürk-1 | 41875 | LEO | Keşif | 1060 kg |
-| Göktürk-2 | 39030 | LEO | Keşif | 409 kg |
-| IMECE | 56197 | LEO | Gözlem | 700 kg |
-| Turksat 3U | 39152 | LEO | CubeSat | 3 kg |
+Düşük Dünya yörüngesi (LEO) ve jeostasyoner yörüngede (GEO) binlerce aktif uydu ve enkaz nesnesi bulunmaktadır. Her yakın geçiş, milyonlarca dolarlık altyapıyı tehdit edebilir. TUA SOPRANOS bu riski otomatik olarak hesaplar, sınıflandırır ve operatörlere önlem önerir.
 
----
-
-## Sistem Mimarisi
+Sistem şu aşamalardan oluşur:
 
 ```
-Space-Track API
-      │
-      ▼
-┌─────────────┐
-│     K1      │  Veri_analizi/
-│  Veri Katmanı│  ├── config.py        → Uydu listesi, CARA eşikleri
-│             │  ├── data_fetch.py     → TLE çekimi, SGP4, tehdit tarama
-│             │  ├── orbit_calc.py     → RIC koordinat, kovaryans projeksiyonu
-│             │  └── threat_analysis.py→ Önceliklendirme skoru
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│     K2      │  model/
-│  Model Katmanı│  ├── ml_training.py   → XGBoost + LSTM eğitim pipeline
-│             │  ├── ml_model.py       → Çıkarım, hybrid pipeline
-│             │  ├── cara_engine.py    → NASA CARA 2D Pc hesabı (dblquad)
-│             │  ├── game_theory.py    → Nash dengesi, yakıt bütçesi
-│             │  ├── maneuver.py       → Delta-V hesabı, manevra seçenekleri
-│             │  ├── threat_analysis.py→ K2 tehdit skorlama
-│             │  └── model_evaluation.py→ Confusion matrix, ROC-AUC raporu
-└─────────────┘
-       │
-       ▼
-  run_k2_live.py   → Uçtan uca canlı entegrasyon
-  test_k2.py       → 41 testlik doğrulama paketi
+Space-Track API (TLE verisi)
+        ↓
+[K1] Veri Katmanı   → SGP4 yörünge yayılımı, tehdit taraması
+        ↓
+[K2] Model Katmanı  → XGBoost risk sınıfı, LSTM yörünge düzeltmesi,
+                       NASA CARA çarpışma olasılığı, oyun teorisi kararı
+        ↓
+[K3] Arayüz         → FastAPI REST + React/CesiumJS 3B görselleştirme
 ```
 
 ---
 
-## Kurulum
+## 🛸 İzlenen Uydular (13 Adet)
 
-### Gereksinimler
+### GEO — Haberleşme
+| Uydu | NORAD ID | Durum |
+|------|----------|-------|
+| Türksat 3A | 37160 | Aktif |
+| Türksat 4A | 39522 | Aktif |
+| Türksat 4B | 40319 | Aktif |
+| Türksat 5A | 47306 | Aktif |
+| Türksat 5B | 50212 | Aktif |
+| Türksat 6A | 60233 | Aktif |
 
-```bash
-pip install sgp4 xgboost scikit-learn numpy scipy requests torch
-```
+### LEO — Gözlem / Keşif
+| Uydu | NORAD ID | Durum |
+|------|----------|-------|
+| Göktürk-1 | 41829 | Aktif |
+| Göktürk-2 | 38331 | Aktif |
+| İMECE | 55469 | Aktif |
+| Türksat 3U | 39770 | Aktif |
 
-### Space-Track Hesabı
-
-`tua_sopranos1/Veri_analizi/config.py` dosyasına kendi bilgilerinizi girin:
-
-```python
-SPACETRACK_USER = "email@example.com"
-SPACETRACK_PASS = "sifreniz"
-```
-
----
-
-## Kullanım
-
-### Canlı Analiz
-
-```bash
-cd tua_sopranos1
-python run_k2_live.py
-```
-
-Çıktı adımları:
-1. **Veri Yükleme** — Space-Track'ten TLE çekimi (cache varsa cache'ten)
-2. **Pozisyon Hesabı** — SGP4 ile anlık pozisyon + güven skoru
-3. **Tehdit Tarama** — Her uydu için en yakın 5 tehdit
-4. **CARA Pc Hesabı** — TCA propagasyonu + 2D çarpışma olasılığı
-5. **Manevra Önerisi** — 3 seçenekli Delta-V hesabı
-6. **Oyun Teorisi** — Nash dengesi ile manevra kararı
-7. **Yakıt Bütçesi** — Optimal Pc eşiği belirleme
-8. **CDM Üretimi** — CCSDS 508.0 uyumlu XML dosyası
-
-### Testler
-
-```bash
-cd tua_sopranos1
-python test_k2.py
-```
-
-41 test — 4 seviye:
-- Level 1: Import kontrolleri
-- Level 2: Fizik fonksiyonları (SGP4, Pc, RIC)
-- Level 3: ML model çıkarımı
-- Level 4: Uçtan uca entegrasyon
+### Emekli (Enkaz Statüsünde)
+Türksat 1B · Türksat 1C · Türksat 2A
 
 ---
 
-## ML Modelleri
+## ⚙️ Mimari ve Teknolojiler
 
-### XGBoost Risk Sınıflandırıcı
+### Backend — Python
+| Teknoloji | Kullanım |
+|-----------|---------|
+| **FastAPI** | REST API sunucusu |
+| **SGP4** | TLE tabanlı yörünge yayılımı |
+| **XGBoost** | Risk sınıflandırma (GREEN / YELLOW / RED) |
+| **PyTorch LSTM** | SGP4 artık düzeltme / yörünge tahmini |
+| **SciPy** | NASA CARA 2B çarpışma olasılığı entegrasyonu |
+| **NumPy** | Matris cebiri, koordinat dönüşümleri (ECI↔ECEF) |
+| **Uvicorn** | ASGI uygulama sunucusu |
 
-18 özellik üzerine eğitilmiş çok sınıflı sınıflandırıcı:
+### Frontend — JavaScript
+| Teknoloji | Kullanım |
+|-----------|---------|
+| **React 18** | Bileşen tabanlı arayüz |
+| **Vite 5** | Geliştirme ve üretim derleme aracı |
+| **CesiumJS** | 3B jeouzamsal küre görselleştirmesi |
 
-| Özellik | Açıklama |
-|---------|----------|
-| miss_km | 2D kaçırma mesafesi |
-| mahalanobis | Miss/sigma oranı |
-| rel_vel | Göreli hız (km/s) |
-| hbr_m | Hard Body Radius (m) |
-| altitude | Yörünge yüksekliği |
-| cov_trace | Kovaryans izi |
-| tca_hours | TCA'ya kalan süre |
-| ... | (18 özellik toplam) |
-
-Çıktı: `GREEN` / `YELLOW` / `RED`
-
-| Sınıf | Pc Aralığı | Aksiyon |
-|-------|-----------|---------|
-| GREEN | Pc ≤ 1e-5 | Rutin izleme |
-| YELLOW | 1e-5 < Pc ≤ 1e-4 | İzle, plan hazırla |
-| RED | Pc > 1e-4 | Acil manevra |
-
-### LSTM Yörünge Düzeltici
-
-SGP4'ün artık hatalarını öğrenen 2 katmanlı LSTM:
-- Giriş: 48 saatlik SGP4 yörüngesi `(batch, 48, 7)`
-- Çıkış: 24 saatlik düzeltme residualı `(batch, 24, 3)`
-
-### Eğitim Verisi
-
-Üç kaynaktan oluşan karma dataset:
-1. **Zaman Serisi Tarama** — 7 gün / 1 saat adım, 13 uydu × 1000 çöp
-2. **Geçmiş TLE Analizi** — Son 30 günün pozisyon geçmişi
-3. **SOCRATES CSV** — CelesTrak conjunction veritabanı (131.677 kayıt)
-
-### Modeli Yeniden Eğitmek (Google Colab — GPU)
-
-```
-tua_sopranos1/TUA_SOPRANOS_Colab_Training.ipynb
-```
-
-Eğitim sonrası indirilen dosyaları `tua_sopranos1/model/` klasörüne koy:
-
-```
-model/
-├── xgboost_risk_model.pkl
-├── lstm_orbit_model.pt
-├── lstm_scaler.pkl
-└── evaluation_report.json
-```
+### Veri Kaynakları
+| Kaynak | İçerik |
+|--------|--------|
+| **Space-Track API** | Güncel NORAD TLE verileri |
+| **CelesTrak SOCRATES** | 131.677 kayıtlık eğitim veri seti |
+| **CCSDS 508.0 CDM** | Uluslararası standart çarpışma veri mesajı (XML) |
 
 ---
 
-## Fizik Metodolojisi
+## 🔬 Temel Özellikler
 
-### CARA 2D Pc Hesabı
+### 1. Gerçek Zamanlı TLE Yönetimi
+Space-Track API'den en güncel ephemerisleri çeker. Veri yaşına göre TLE güven skoru (0–100%) hesaplar ve akıllı önbellekleme ile gereksiz API çağrısını önler.
 
-NASA CARA (Conjunction Assessment Risk Analysis) standardı:
+### 2. SGP4 Yörünge Yayılımı
+Her uydu için anlık konum ve 24 saatlik yörünge yayı hesaplanır. ECI koordinat sisteminden ECEF ve coğrafi koordinatlara dönüşüm gerçekleştirilir.
+
+### 3. NASA CARA 2B Çarpışma Olasılığı (Pc)
+Foster (1992) yöntemine dayalı çift entegrasyon ile çarpışma olasılığı hesaplanır. Birleşik kovaryans matrisi, HBR (Hard Body Radius) ve göreli hız kullanılır.
+
+| Pc Eşiği | Seviye | Eylem |
+|----------|--------|-------|
+| Pc ≥ 1×10⁻⁴ | 🔴 RED | Acil manevra |
+| 1×10⁻⁶ ≤ Pc < 1×10⁻⁴ | 🟡 YELLOW | Manevra değerlendirmesi |
+| Pc < 1×10⁻⁶ | 🟢 GREEN | İzleme |
+
+### 4. Hibrit Makine Öğrenmesi Hattı
+- **XGBoost**: 18 özellikli tablo verisiyle eğitilmiş çok sınıflı risk sınıflandırıcı. Binlerce yakın geçiş milisaniyeler içinde taranır; yalnızca YELLOW/RED olanlar CARA hesabına gönderilir.
+- **LSTM**: İki katmanlı LSTM ağı, SGP4'ün uzun vadeli birikimli hatasını düzeltir ve daha hassas yörünge tahmini üretir.
+
+### 5. Manevra Karar Sistemi
+Tsiolkovsky füze denklemi kullanılarak üç manevra seçeneği hesaplanır:
 
 ```
-Pc = ∬_{x²+y² ≤ HBR²} f(x,y) dx dy
-
-f(x,y) = bivariate normal PDF
-HBR    = Hard Body Radius (iki nesnenin fiziksel boyutlarının toplamı)
+m_yakıt = m_ıslak × (1 − exp(−|Δv| / (Isp × g₀)))
 ```
 
-`miss_km` yüzlerce km olduğunda Pc matematiksel olarak sıfıra yaklaşır — bu fiziksel olarak doğrudur.
+| Strateji | Δv | Avantaj |
+|----------|----|---------|
+| Micro Nudge (prograde) | ~0.05 m/s | Minimum yakıt tüketimi |
+| Radyal İtme | ~0.20 m/s | Güvenilir açıklık |
+| Acil Retrograde | ~0.80 m/s | Garantili kaçınma |
+| Çift Vuruşlu | ~0.20 m/s | GEO istasyon tutma dostu |
 
-### SGP4 Güven Skoru
+### 6. Oyun Teorisi ile Karar Optimizasyonu
+Nash denge analizi, manevrayı kimin yapması gerektiğine karar verir: birincil uydu mu (Türk uydusu) yoksa ikincil nesne mi? Yakıt bütçesi, çarpışma olasılığı ve manevra kapasitesi dikkate alınır.
 
-```
-Güven = 100% - (TLE_yaş_saat × 1.6%)
-LEO: atmosfer direnci nedeniyle güven daha hızlı düşer
-GEO: saatte ~0.14% bozunma
-```
+### 7. CDM Üretimi
+CCSDS 508.0 standardına uygun Conjunction Data Message (XML) otomatik üretilir. Operatörlere ve uluslararası ajanslarla paylaşıma hazır formatta çıktı verilir.
 
-### Nash Dengesi Manevra Kararı
-
-İki aktörlü oyun teorisi: Türk uydusu vs. tehdit nesnesi. Yakıt oranı, nesne tipi (debris/aktif) ve Pc değerine göre optimal strateji belirlenir.
+### 8. 3B Gerçek Zamanlı Gösterge Paneli
+- **Küre**: ArcGIS World Imagery üzerine gerçekçi uydu fotoğrafları + Cesium Ion 3B arazi
+- **Yörüngeler**: SGP4 yolu (beyaz), LSTM tahmini (cyan kesikli), tehdit yörüngesi (renk kodlu)
+- **Tehdit noktaları**: TCA (Time of Closest Approach) konumu, mesafe çizgisi
+- **Manevra Simülatörü**: Senaryo seçilince backend fizik hesabı çalışır, sonuçlar anlık gösterilir
 
 ---
 
-## Proje Yapısı
+## 🗂️ Proje Yapısı
 
 ```
 TUA_SOPRANOS/
-└── tua_sopranos1/
-    ├── Veri_analizi/
-    │   ├── config.py
-    │   ├── data_fetch.py
-    │   ├── orbit_calc.py
-    │   └── threat_analysis.py
-    ├── model/
-    │   ├── ml_training.py
-    │   ├── ml_model.py
-    │   ├── cara_engine.py
-    │   ├── game_theory.py
-    │   ├── maneuver.py
-    │   ├── threat_analysis.py
-    │   ├── model_evaluation.py
-    │   ├── __init__.py
-    │   ├── xgboost_risk_model.pkl   ← eğitilmiş model
-    │   ├── lstm_orbit_model.pt      ← eğitilmiş model
-    │   └── lstm_scaler.pkl          ← normalizasyon
-    ├── cache/                        ← TLE cache (otomatik)
-    ├── socrates.csv                  ← CelesTrak conjunction verisi
-    ├── run_k2_live.py               ← ana çalıştırıcı
-    ├── test_k2.py                   ← test paketi
-    └── TUA_SOPRANOS_Colab_Training.ipynb
+├── tua_sopranos1/                   # Python backend
+│   ├── Veri_analizi/                # K1 — Veri ve yörünge katmanı
+│   │   ├── config.py                # Uydu kayıt defteri, CARA eşikleri
+│   │   ├── data_fetch.py            # Space-Track TLE çekimi ve önbellekleme
+│   │   ├── orbit_calc.py            # SGP4, RIC koordinatları, kovaryans
+│   │   └── threat_analysis.py       # Tehdit önceliklendirme, ıska mesafesi
+│   ├── model/                       # K2 — Model katmanı
+│   │   ├── cara_engine.py           # NASA CARA 2B Pc hesaplayıcı
+│   │   ├── game_theory.py           # Nash denge manevra kararı
+│   │   ├── maneuver.py              # Delta-V ve yakıt hesapları
+│   │   ├── ml_model.py              # XGBoost + LSTM çıkarım motoru
+│   │   ├── ml_training.py           # Model eğitim hattı
+│   │   ├── xgboost_risk_model.pkl   # Eğitilmiş XGBoost modeli
+│   │   ├── lstm_orbit_model.pt      # Eğitilmiş LSTM modeli
+│   │   └── lstm_scaler.pkl          # LSTM normalizasyon parametreleri
+│   ├── api.py                       # FastAPI REST sunucusu
+│   ├── ui_data_generator.py         # Frontend JSON toplayıcı
+│   ├── retrain_xgb.py               # XGBoost yeniden eğitim scripti
+│   └── TUA_SOPRANOS_Colab_Training.ipynb
+│
+├── tua_sopranos_ui/                 # React + CesiumJS frontend
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── Globe.jsx            # 3B CesiumJS küre
+│   │   │   ├── SatellitePanel.jsx   # Sol panel — uydu listesi
+│   │   │   ├── ThreatPanel.jsx      # Sağ panel — tehdit detayı + simülatör
+│   │   │   └── StatusBar.jsx        # Üst durum çubuğu
+│   │   ├── hooks/useApiData.js      # API polling hook
+│   │   └── utils/demoData.js        # Demo veri ve renk sabitleri
+│   ├── .env                         # VITE_API_URL, VITE_CESIUM_TOKEN
+│   └── vite.config.js
+│
+└── CDM_Turksat_3U.xml               # Örnek CCSDS 508.0 CDM dosyası
 ```
 
 ---
 
-## Çıktı Örneği
+## 🚀 Kurulum ve Çalıştırma
+
+### Gereksinimler
+- Python 3.10+
+- Node.js 18+
+- Space-Track hesabı (ücretsiz — [space-track.org](https://www.space-track.org))
+- Cesium Ion hesabı (ücretsiz — [ion.cesium.com](https://ion.cesium.com))
+
+### Backend
+
+```bash
+cd tua_sopranos1
+
+# Bağımlılıkları yükle
+pip install fastapi uvicorn sgp4 numpy scipy torch xgboost scikit-learn joblib
+
+# XGBoost modelini mevcut ortam için yeniden eğit
+python retrain_xgb.py
+
+# Sunucuyu başlat
+python -m uvicorn api:app --reload --host 0.0.0.0 --port 8000
+```
+
+API dokümantasyonu: [http://localhost:8000/docs](http://localhost:8000/docs)
+
+### Frontend
+
+```bash
+cd tua_sopranos_ui
+
+# Bağımlılıkları yükle
+npm install
+
+# .env dosyasını yapılandır
+# VITE_API_URL=http://localhost:8000
+# VITE_CESIUM_TOKEN=<Cesium Ion tokenınız>
+
+# Geliştirme sunucusunu başlat
+npm run dev
+```
+
+Arayüz: [http://localhost:3000](http://localhost:3000)
+
+---
+
+## 📡 API Uç Noktaları
+
+| Yöntem | Uç Nokta | Açıklama |
+|--------|----------|---------|
+| GET | `/api/full` | Tüm uydu verisi (yörüngeler, tehditler, manevra önerileri) |
+| GET | `/api/status` | Sistem özeti (hafif) |
+| GET | `/api/satellites` | Uydu listesi |
+| GET | `/api/satellite/{name}` | Tek uydu tam detayı |
+| GET | `/api/threats/{name}` | Uydu tehdit listesi (seviye filtresi destekli) |
+| POST | `/api/simulate_maneuver` | Fizik tabanlı manevra simülasyonu |
+| POST | `/api/refresh` | Önbelleği zorla yenile |
+
+---
+
+## 📊 Veri Akışı
 
 ```
-  Uydu             Tehdit              Mesafe       Pc      CARA
-  ──────────────── ─────────────────── ──────── ──────── ──────
-  Gokturk-2        OAO 1               310290m  4.32e-211  🟢 GREEN
-  Turksat 1B       INMARSAT 2-F4       305368m  0.00e+00   🟢 GREEN
-  Turksat 4B       COSMOS 775          796766m  0.00e+00   🟢 GREEN
+1.  TLE Çekimi          Space-Track API → önbellek
+2.  SGP4 Yayılımı       Anlık konum + 24h yörünge yayı
+3.  Enkaz Taraması      200 km eşiği içindeki tehdit adayları
+4.  CARA Hesabı         Her tehdit için 2B Pc çift entegrasyonu
+5.  XGBoost Sınıfı      GREEN / YELLOW / RED risk etiketi
+6.  LSTM Düzeltmesi     SGP4 artık tahmini → rafine yörünge
+7.  Manevra Seçenekleri 3 × Δv stratejisi + yakıt maliyeti
+8.  Nash Dengesi        Kimin manevra yapacağı kararı
+9.  CDM Dışa Aktarım    CCSDS 508.0 XML operatörlere
+10. UI Güncelleme       REST API → React / CesiumJS
 ```
 
 ---
 
-## Hackathon — TUA SOPRANOS Ekibi
+## 🏆 Hackathon
+
+Bu proje **TUA (Türkiye Uzay Ajansı)** hackathonu kapsamında geliştirilmiştir.
+
+**Takım:** TUA SOPRANOS
+
+---
+
+## 📄 Standartlar ve Referanslar
+
+- **CCSDS 508.0-B-1** — Conjunction Data Message standardı
+- **Foster (1992)** — 2D Pc hesaplama yöntemi (NASA CARA)
+- **Grinsztajn et al. (2022)** — Tablo verisi için XGBoost üstünlüğü (NeurIPS)
+- **Tsiolkovsky Roketi Denklemi** — Delta-V ve yakıt kütlesi ilişkisi
+- **SGP4/SDP4** — NORAD standart yörünge yayılım modeli
+
+---
+
+<div align="center">
+  <sub>Türk uydularını korumak için geliştirildi 🇹🇷</sub>
+</div>

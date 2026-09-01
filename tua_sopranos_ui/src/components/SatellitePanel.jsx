@@ -24,8 +24,8 @@ function FuelBar({ fuelKg, maxFuel = 500 }) {
 }
 
 function SatCard({ sat, isSelected, onClick }) {
-  const level   = sat.threat_level || 'GREEN'
-  const pos     = sat.current_position
+  const level = 'GREEN'
+  const pos = sat.current_position
   const retired = sat.status === 'retired'
 
   return (
@@ -62,7 +62,7 @@ function SatCard({ sat, isSelected, onClick }) {
 }
 
 export default function SatellitePanel({ satellites, selected, onSelect, loading }) {
-  const active  = satellites?.filter(s => s.status !== 'retired') || []
+  const active = satellites?.filter(s => s.status !== 'retired') || []
   const retired = satellites?.filter(s => s.status === 'retired') || []
 
   return (

@@ -130,8 +130,14 @@ def load_model(path: str = None) -> Optional[dict]:
     if not os.path.exists(model_path):
         return None
 
-    with open(model_path, "rb") as f:
-        _cached_xgb_model = pickle.load(f)
+    try:
+        import joblib as _joblib
+        _cached_xgb_model = _joblib.load(model_path)
+    except Exception:
+        # fallback to pickle for legacy files
+        with open(model_path, "rb") as f:
+            import pickle as _pickle
+            _cached_xgb_model = _pickle.load(f)
 
     return _cached_xgb_model
 

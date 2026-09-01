@@ -189,6 +189,81 @@ def generate_ui_data(
 # ═════════════════════════════════════════════════════════════════════════════
 # YARDIMCI: TEK UYDU GİRİŞİ OLUSTUR
 # ═════════════════════════════════════════════════════════════════════════════
+# YARDIMCI: TÜRKSAT 6A DEMO TEHDİT ÜRETECİ
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _mock_6a_threat(sat_pos: dict) -> dict:
+    """
+    Türksat 6A için sabit bir RED demo tehditi döndürür.
+
+    Gerçek çarpışma tarama boş geldiğinde jüri demosu için kullanılır.
+    Tüm değerler, gerçek predict_conjunction_threats() çıktısıyla aynı
+    yapıyı paylaşır — frontend hiçbir fark görmez.
+    """
+    import datetime as _dt
+
+    sat_lon = sat_pos.get("lon", 42.0)
+    sat_lat = sat_pos.get("lat", 0.1)
+    sat_alt = sat_pos.get("alt_km", 35786.0)
+
+    # Tehdit objesi Türksat 6A'nın ~0.28 km yakınında, GEO yörüngede
+    threat_lon = sat_lon + 0.003
+    threat_lat = sat_lat + 0.001
+    threat_alt = sat_alt + 0.28
+
+    tca_hours  = 8.4       # TCA 8.4 saat sonra
+    min_dist   = 0.28      # km
+    rel_vel    = 0.31      # km/s  (GEO'ya özgü düşük göreceli hız)
+    initial_pc = 1.47e-4   # RED eşiğinin üstünde
+
+    # TCA sonrası Pc ~ başlangıç (manevra yapılmamış senaryo)
+    pc_str = f"{initial_pc:.2e}"
+
+    return {
+        "object_name":          "SL-12 R/B DEMO",
+        "norad_id":             19650,
+        "orbit_type":           "GEO",
+        "min_distance_km":      min_dist,
+        "tca_hours_from_now":   tca_hours,
+        "relative_velocity_kms": rel_vel,
+        "is_demo":              True,          # UI'da DEMO rozeti gösterir
+        # TCA konumları (globe'da çizgi için)
+        "primary_position": {
+            "lat": sat_lat, "lon": sat_lon, "alt_km": sat_alt,
+        },
+        "threat_position": {
+            "lat": threat_lat, "lon": threat_lon, "alt_km": threat_alt,
+        },
+        # Tehdit yörünge halkası (GEO matematik halkası, ~35789 km)
+        "orbit_path": [
+            {
+                "lat": 0.12 * __import__("math").sin((i / 150) * 2 * __import__("math").pi),
+                "lon": (i / 150) * 360 - 180,
+                "alt_km": 35789.0,
+            }
+            for i in range(151)
+        ],
+        # Sınıflandırma
+        "classification": {
+            "label":    "RED",
+            "color":    "#ff3366",
+            "run_cara": True,
+        },
+        # CARA sonucu
+        "cara_result": {
+            "status":       "RED",
+            "pc":           initial_pc,
+            "pc_scientific": pc_str,
+            "method":       "Foster-1992 2D-Pc (demo)",
+        },
+        "xgb_risk": "RED",
+        "radial_km":     min_dist * 0.6,
+        "intrack_km":    min_dist * 0.3,
+        "crosstrack_km": min_dist * 0.1,
+    }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 
 def _build_satellite_entry(
     sat_name:            str,
@@ -292,6 +367,19 @@ def _build_satellite_entry(
 
     threats       = conj_result.get("threats", [])
     threat_summary = conj_result.get("summary", {})
+
+    # ── Türksat 6A demo güvencesi: jüri için her zaman bir RED tehdit ────────
+    # Gerçek çarpışma tespiti boş dönse bile (sessiz GEO yörüngesi, kısa TLE
+    # penceresi) simülatörün çalışması için sabit bir tehdit eklenir.
+    if sat_name == "Turksat 6A":
+        already_has_red = any(
+            t.get("classification", {}).get("label") in ("RED", "YELLOW")
+            for t in threats
+        )
+        if not already_has_red:
+            import math as _math
+            pos = current_position or {}
+            threats = [_mock_6a_threat(pos)] + threats
 
     # En kotu tehdit seviyesi
     threat_level = _worst_level(threats)

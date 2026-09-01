@@ -15,6 +15,12 @@ import { useEffect, useRef } from 'react'
 import * as Cesium from 'cesium'
 import { ORBIT_LINE_COLORS, LEVEL_COLORS, DEMO_THREATS } from '../utils/demoData'
 
+// Cesium Ion ucretsiz katman — Dunya Arazisi icin gerekli.
+// https://ion.cesium.com adresinden ucretsiz hesap aciniz ve token'inizi asagiya yapistirin.
+// Token olmadan arazi duz kalir (Ellipsoid), goruntu yine gercekci gorunur.
+const ION_TOKEN = import.meta.env.VITE_CESIUM_TOKEN || ''
+if (ION_TOKEN) Cesium.Ion.defaultAccessToken = ION_TOKEN
+
 const SAT_POINT_SIZE = 7
 const SELECTED_SIZE  = 14
 
@@ -63,10 +69,19 @@ export default function Globe({ allSatellites, selectedSat, demoMode, onGlobeRea
   useEffect(() => {
     if (!containerRef.current || viewerRef.current) return
 
+    // ── Cesium 1.104+ async API kullan ───────────────────────────────────
+    // fromUrl() / fromWorldTerrain() — eski sync constructor'lar deprecated.
     const viewer = new Cesium.Viewer(containerRef.current, {
-      imageryProvider: new Cesium.TileMapServiceImageryProvider({
-        url: Cesium.buildModuleUrl('Assets/Textures/NaturalEarthII'),
-      }),
+      // ArcGIS World Imagery — gercek uydu fotograflari, token gerekmez
+      baseLayer: Cesium.ImageryLayer.fromProviderAsync(
+        Cesium.ArcGisMapServerImageryProvider.fromUrl(
+          'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer'
+        )
+      ),
+      // Arazi: Ion token varsa 3D yukseklik, yoksa duz elipsoid
+      terrain: ION_TOKEN
+        ? Cesium.Terrain.fromWorldTerrain()
+        : undefined,
       baseLayerPicker:      false,
       geocoder:             false,
       homeButton:           false,
@@ -80,11 +95,36 @@ export default function Globe({ allSatellites, selectedSat, demoMode, onGlobeRea
       creditContainer:      document.createElement('div'),
     })
 
-    // Uzay temasi
-    viewer.scene.backgroundColor       = Cesium.Color.BLACK
-    viewer.scene.globe.enableLighting  = true
-    viewer.scene.globe.atmosphereLightIntensity = 15.0
-    if (viewer.scene.skyAtmosphere) viewer.scene.skyAtmosphere.show = true
+    // ── Gercekci atmosfer & aydinlatma ───────────────────────────────────
+    viewer.scene.backgroundColor = Cesium.Color.BLACK
+
+    // Gunes pozisyonuna gore dinamik yuzey aydinlatmasi
+    viewer.scene.globe.enableLighting          = true
+    viewer.scene.globe.atmosphereLightIntensity = 10.0
+    viewer.scene.globe.showGroundAtmosphere     = true
+
+    // Daha gercekci atmosfer renkleri
+    const atm = viewer.scene.skyAtmosphere
+    if (atm) {
+      atm.show                     = true
+      atm.atmosphereLightIntensity = 20.0
+      atm.hueShift                 = 0.0
+      atm.saturationShift          = 0.1
+      atm.brightnessShift          = 0.0
+    }
+
+    // Uzay siyahi arka plan + yildizlar
+    viewer.scene.skyBox.show = true
+    viewer.scene.sun.show    = true
+    viewer.scene.moon.show   = true
+
+    // Yer alti derinlik testi — uydular glob tarafindan gizlenmez
+    viewer.scene.globe.depthTestAgainstTerrain = false
+
+    // Fog: uzak mesafede atmosfer gorunumu
+    viewer.scene.fog.enabled         = true
+    viewer.scene.fog.density         = 0.0001
+    viewer.scene.fog.minimumBrightness = 0.15
 
     // ── Kamera kontrolleri — akici hissettirmek icin ─────────────────────
     const ctrl = viewer.scene.screenSpaceCameraController
@@ -221,19 +261,32 @@ export default function Globe({ allSatellites, selectedSat, demoMode, onGlobeRea
     }
 
     // ── 4. LSTM tahmini yolu ───────────────────────────────────────────
+    // GEO: Mock LSTM buyuk artiklar uretir → tam yuzuk cizer (~265,000 km).
+    // Span dogrulamasi: GEO icin 5,000 km esigini asan yolu atla.
     const lstmPath = selectedSat.predicted_path || []
     if (lstmPath.length > 1) {
-      viewer.entities.add({
-        id:       'sel-orbit-lstm',
-        polyline: {
-          positions: lstmPath.map(p =>
-            Cesium.Cartesian3.fromDegrees(p.lon, p.lat, p.alt_km * 1000)
-          ),
-          width:    3,
-          material: dashMaterial(ORBIT_LINE_COLORS.lstm, 22),
-          arcType:  Cesium.ArcType.NONE,
-        },
-      })
+      let lstmSpanKm = 0
+      for (let i = 1; i < lstmPath.length; i++) {
+        const dlat = (lstmPath[i].lat - lstmPath[i - 1].lat) * 111
+        const dlon = (lstmPath[i].lon - lstmPath[i - 1].lon) * 111 *
+          Math.cos(lstmPath[i].lat * Math.PI / 180)
+        lstmSpanKm += Math.sqrt(dlat * dlat + dlon * dlon)
+      }
+      const lstmValid = isGeo ? lstmSpanKm < 5_000 : true
+
+      if (lstmValid) {
+        viewer.entities.add({
+          id:       'sel-orbit-lstm',
+          polyline: {
+            positions: lstmPath.map(p =>
+              Cesium.Cartesian3.fromDegrees(p.lon, p.lat, p.alt_km * 1000)
+            ),
+            width:    3,
+            material: dashMaterial(ORBIT_LINE_COLORS.lstm, 22),
+            arcType:  Cesium.ArcType.NONE,
+          },
+        })
+      }
     }
 
     // ── 5. Tehditler ───────────────────────────────────────────────────
@@ -346,11 +399,15 @@ export default function Globe({ allSatellites, selectedSat, demoMode, onGlobeRea
         new Cesium.Cartesian3()
       )
 
+      // flyTo animates movement; orientation arg is ignored during animation.
+      // Apply the real direction+up in the complete callback via setView.
       viewer.camera.flyTo({
-        destination: camPos,
-        orientation: { direction: dir, up },
+        destination:    camPos,
         duration:       2.5,
         easingFunction: Cesium.EasingFunction.CUBIC_IN_OUT,
+        complete: () => {
+          viewer.camera.setView({ orientation: { direction: dir, up } })
+        },
       })
     } else {
       // LEO: orbit yayini saran bounding sphere hesapla
