@@ -10,6 +10,15 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 const API_URL  = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 const POLL_MS  = 10 * 60 * 1000  // 10 dakika
 
+function getTimeoutSignal(ms) {
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+    return AbortSignal.timeout(ms)
+  }
+  const controller = new AbortController()
+  setTimeout(() => controller.abort(), ms)
+  return controller.signal
+}
+
 export function useApiData() {
   const [data,      setData]      = useState(null)
   const [loading,   setLoading]   = useState(true)
@@ -22,7 +31,7 @@ export function useApiData() {
     try {
       setError(null)
       const res = await fetch(`${API_URL}/api/full`, {
-        signal: AbortSignal.timeout(30_000), // 30s timeout
+        signal: getTimeoutSignal(30_000), // 30s timeout
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const json = await res.json()
@@ -62,7 +71,7 @@ export function useSystemStatus() {
 
   useEffect(() => {
     let cancelled = false
-    fetch(`${API_URL}/api/status`, { signal: AbortSignal.timeout(5_000) })
+    fetch(`${API_URL}/api/status`, { signal: getTimeoutSignal(5_000) })
       .then(r => r.ok ? r.json() : null)
       .then(json => { if (!cancelled && json) setStatus(json) })
       .catch(() => {})

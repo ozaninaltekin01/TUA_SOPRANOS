@@ -35,10 +35,24 @@ import pickle
 import datetime
 from typing import Dict, List, Optional, Tuple
 
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # ── K1 modülleri ─────────────────────────────────────────────────────────────
 _BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _BASE)
-sys.path.insert(0, os.path.join(_BASE, "Veri_analizi"))
+if _BASE not in sys.path:
+    sys.path.insert(0, _BASE)
+_VERI_DIR = os.path.join(_BASE, "Veri_analizi")
+if _VERI_DIR not in sys.path:
+    sys.path.insert(0, _VERI_DIR)
 
 try:
     from .cara_engine import compute_pc, assess_cara_status
@@ -97,6 +111,12 @@ FEATURE_NAMES = [
 ]
 
 CLASS_LABELS = ["GREEN", "YELLOW", "RED"]
+
+_RECOMMENDATIONS = {
+    "GREEN":  "Güvenli — detaylı Pc hesabı gereksiz",
+    "YELLOW": "Dikkat — cara_engine ile detaylı Pc hesaplayın",
+    "RED":    "TEHLİKE — acil Pc hesabı + manevra değerlendirmesi",
+}
 
 LSTM_SEQ_IN   = 48
 LSTM_SEQ_OUT  = 24
@@ -247,8 +267,8 @@ def predict_risk(
     features = extract_features(conjunction_data)
     features = np.nan_to_num(features, nan=0.0, posinf=1e6, neginf=-1e6)
 
-    pred_idx   = int(model.predict(features)[0])
     pred_proba = model.predict_proba(features)[0]
+    pred_idx   = int(np.argmax(pred_proba))
     pred_class = CLASS_LABELS[pred_idx]
     confidence = float(pred_proba[pred_idx]) * 100
 
@@ -261,11 +281,7 @@ def predict_risk(
             "RED":    round(float(pred_proba[2]) * 100, 1),
         },
         "needs_detailed_pc": pred_class in ("YELLOW", "RED"),
-        "recommendation": {
-            "GREEN":  "Güvenli — detaylı Pc hesabı gereksiz",
-            "YELLOW": "Dikkat — cara_engine ile detaylı Pc hesaplayın",
-            "RED":    "TEHLİKE — acil Pc hesabı + manevra değerlendirmesi",
-        }[pred_class],
+        "recommendation": _RECOMMENDATIONS.get(pred_class, ""),
     }
 
 

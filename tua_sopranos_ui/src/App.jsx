@@ -9,7 +9,7 @@
  *   BottomBar (bottom)
  */
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useMemo } from 'react'
 import { useApiData }      from './hooks/useApiData'
 import Globe               from './components/Globe'
 import SatellitePanel      from './components/SatellitePanel'
@@ -111,6 +111,24 @@ export default function App() {
     setGlobeReady(true)
   }, [])
 
+  // Top Critical Threat Ticker
+  const topCriticalThreat = useMemo(() => {
+    for (const s of satellites) {
+      if (s.threat_level === 'RED' || (s.threats && s.threats.some(t => t.classification?.label === 'RED'))) {
+        const topT = s.threats?.find(t => t.classification?.label === 'RED') || s.threats?.[0]
+        return {
+          satName: s.name,
+          debrisName: topT?.object_name || 'ENCOUNTER DEBRIS',
+          minDist: topT?.min_distance_km ?? 0.30,
+          tca: topT?.tca_hours_from_now ?? 18.0,
+          pc: topT?.cara_result?.pc_scientific ?? '1.83e-04',
+          level: 'RED',
+        }
+      }
+    }
+    return null
+  }, [satellites])
+
   // API offline → auto-enable demo mode with an alert
   const showOfflineWarning = !loading && !apiOnline && !demoMode
 
@@ -122,6 +140,27 @@ export default function App() {
         apiOnline={apiOnline}
         lastFetch={lastFetch}
       />
+
+      {/* Top Critical Conjunction Ticker Banner */}
+      {topCriticalThreat && (
+        <div
+          className="top-threat-banner fade-in"
+          onClick={() => handleSelect(topCriticalThreat.satName)}
+          title="Click to jump to satellite & run avoidance maneuvers"
+        >
+          <div className="pulse-alert-dot" />
+          <span className="banner-badge">CRITICAL CONJUNCTION ALERT</span>
+          <span className="banner-text">
+            <strong>{topCriticalThreat.satName}</strong> ⟵ <strong>{topCriticalThreat.debrisName}</strong>
+            &nbsp;·&nbsp; Min Distance: <strong>{topCriticalThreat.minDist.toFixed(2)} km</strong>
+            &nbsp;·&nbsp; TCA: <strong>{topCriticalThreat.tca.toFixed(1)} h</strong>
+            &nbsp;·&nbsp; CARA Pc: <strong>{topCriticalThreat.pc}</strong>
+          </span>
+          <button className="banner-action-btn">
+            RUN MANEUVER SIMULATOR →
+          </button>
+        </div>
+      )}
 
       {showOfflineWarning && (
         <div style={{

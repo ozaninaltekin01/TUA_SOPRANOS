@@ -17,9 +17,24 @@ import os
 import traceback
 import numpy as np
 
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # Repo kök dizininden çalışması için path ayarla
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "Veri_analizi"))
+_BASE = os.path.dirname(os.path.abspath(__file__))
+if _BASE not in sys.path:
+    sys.path.insert(0, _BASE)
+_VERI_DIR = os.path.join(_BASE, "Veri_analizi")
+if _VERI_DIR not in sys.path:
+    sys.path.insert(0, _VERI_DIR)
 
 passed = 0
 failed = 0

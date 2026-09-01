@@ -28,10 +28,24 @@ import threading
 import time
 from typing import Optional
 
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # ── Path ayari ────────────────────────────────────────────────────────────────
 _BASE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _BASE)
-sys.path.insert(0, os.path.join(_BASE, "Veri_analizi"))
+if _BASE not in sys.path:
+    sys.path.insert(0, _BASE)
+_VERI_DIR = os.path.join(_BASE, "Veri_analizi")
+if _VERI_DIR not in sys.path:
+    sys.path.insert(0, _VERI_DIR)
 
 # ── FastAPI ───────────────────────────────────────────────────────────────────
 from fastapi import FastAPI, HTTPException, BackgroundTasks
@@ -564,6 +578,46 @@ def simulate_maneuver(req: ManeuverRequest, background_tasks: BackgroundTasks):
     )
     result["scenario_id"] = req.scenario_id
     return result
+
+
+class CDMRequest(BaseModel):
+    primary_name:        str
+    secondary_name:      str
+    miss_distance_km:    float = 0.30
+    pc:                  float = 1.83e-4
+    tca_hours:           float = 18.0
+    primary_norad_id:    Optional[str] = None
+    secondary_norad_id:  Optional[str] = "99999"
+
+
+@app.post("/api/cdm", tags=["Compliance"])
+def get_cdm_xml(req: CDMRequest):
+    """
+    CCSDS 508.0-B-1 standardında resmi Conjunction Data Message (XML) üretir.
+    """
+    from model.cara_engine import generate_cdm
+    tca_dt = datetime.datetime.utcnow() + datetime.timedelta(hours=req.tca_hours)
+    assessment = {
+        "pc":                req.pc,
+        "pc_scientific":     f"{req.pc:.2e}",
+        "miss_distance_km":  req.miss_distance_km,
+        "miss_distance_m":   req.miss_distance_km * 1000.0,
+        "time_to_tca_hours": req.tca_hours,
+        "tca":               tca_dt.strftime("%Y-%m-%dT%H:%M:%S.000"),
+        "primary_name":      req.primary_name,
+        "secondary_name":    req.secondary_name,
+        "status":            "RED" if req.pc > 1e-4 else "YELLOW" if req.pc > 1e-5 else "GREEN",
+    }
+    norad_1 = req.primary_norad_id or str(TURKISH_SATELLITES.get(req.primary_name, {}).get("norad_id", "60233"))
+    xml_str = generate_cdm(
+        primary_name       = req.primary_name,
+        secondary_name     = req.secondary_name,
+        assessment         = assessment,
+        primary_norad_id   = norad_1,
+        secondary_norad_id = req.secondary_norad_id or "99999",
+        originator         = "TUA_SOPRANOS_C2",
+    )
+    return {"xml": xml_str, "filename": f"CDM_{req.primary_name.replace(' ', '_')}.xml"}
 
 
 # ═════════════════════════════════════════════════════════════════════════════

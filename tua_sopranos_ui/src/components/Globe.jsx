@@ -425,8 +425,6 @@ export default function Globe({ allSatellites, selectedSat, demoMode, onGlobeRea
             sphere.radius * 1.8,
           ),
         })
-      } else {
-        // orbit_path yoksa uyduya yaklas
         viewer.camera.flyTo({
           destination: Cesium.Cartesian3.fromDegrees(
             pos.lon, pos.lat + 15,
@@ -441,20 +439,79 @@ export default function Globe({ allSatellites, selectedSat, demoMode, onGlobeRea
         })
       }
     }
-
   }, [selectedSat, demoMode]) // eslint-disable-line
 
-  // Secim kaldirilinca Dunya gorunumune don
-  useEffect(() => {
+  // ── Kamera Onayarlari ──────────────────────────────────────────────────
+  const flyToGlobal = () => {
     const viewer = viewerRef.current
-    if (!viewer || selectedSat) return
-
+    if (!viewer) return
     viewer.camera.flyTo({
-      destination: Cesium.Cartesian3.fromDegrees(35.0, 15.0, 28_000_000),
+      destination: Cesium.Cartesian3.fromDegrees(35.0, 15.0, 65_000_000),
       orientation: { heading: 0, pitch: Cesium.Math.toRadians(-50), roll: 0 },
       duration: 1.8,
     })
-  }, [selectedSat])
+  }
 
-  return <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
+  const flyToTurkey = () => {
+    const viewer = viewerRef.current
+    if (!viewer) return
+    viewer.camera.flyTo({
+      destination: Cesium.Cartesian3.fromDegrees(35.24, 38.96, 3_200_000),
+      orientation: { heading: 0, pitch: Cesium.Math.toRadians(-45), roll: 0 },
+      duration: 1.8,
+    })
+  }
+
+  const flyToSatellite = () => {
+    const viewer = viewerRef.current
+    if (!viewer || !selectedSat?.current_position) return
+    const p = selectedSat.current_position
+    const isGeo = selectedSat.orbit_type === 'GEO'
+    viewer.camera.flyTo({
+      destination: Cesium.Cartesian3.fromDegrees(
+        p.lon,
+        isGeo ? p.lat + 12 : p.lat + 8,
+        (isGeo ? 48_000 : 3_500) * 1000
+      ),
+      orientation: { heading: 0, pitch: Cesium.Math.toRadians(-35), roll: 0 },
+      duration: 2.0,
+    })
+  }
+
+  const flyToThreat = () => {
+    const viewer = viewerRef.current
+    if (!viewer || !selectedSat?.current_position) return
+    const p = selectedSat.current_position
+    viewer.camera.flyTo({
+      destination: Cesium.Cartesian3.fromDegrees(p.lon, p.lat + 5, 12_000_000),
+      orientation: { heading: 0, pitch: Cesium.Math.toRadians(-40), roll: 0 },
+      duration: 1.8,
+    })
+  }
+
+  return (
+    <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+      <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
+
+      {/* Floating HUD Camera Presets */}
+      <div className="globe-hud-controls">
+        <button className="hud-btn" onClick={flyToGlobal} title="Global Earth & GEO Belt View">
+          🌍 Global View
+        </button>
+        <button className="hud-btn" onClick={flyToTurkey} title="TUA Ground Station (Ankara / Turkey)">
+          🇹🇷 TUA Station
+        </button>
+        {selectedSat && (
+          <button className="hud-btn active-sat-btn" onClick={flyToSatellite} title={`Follow ${selectedSat.name}`}>
+            🛰️ Track {selectedSat.name}
+          </button>
+        )}
+        {selectedSat?.threats?.length > 0 && (
+          <button className="hud-btn threat-hud-btn" onClick={flyToThreat} title="Focus Conjunction Geometry">
+            🔴 Conjunction Frame
+          </button>
+        )}
+      </div>
+    </div>
+  )
 }

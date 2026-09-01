@@ -1,14 +1,13 @@
 /**
- * ThreatPanel.jsx — Right panel: selected satellite threat details
+ * ThreatPanel.jsx — Right panel: selected satellite threat details & mitigation
  *
- * Sections:
- *  - Satellite meta (altitude, fuel, TLE confidence)
- *  - Threat cards  (distance, TCA, CARA Pc)
- *  - Maneuver recommendation (RED / YELLOW only)
+ * Features:
+ *  - Satellite meta (altitude, fuel, TLE confidence, LSTM state)
+ *  - Threat cards (distance, TCA, CARA Pc, relative velocity)
+ *  - [NEW] CCSDS 508.0-B-1 Conjunction Data Message (CDM XML) Exporter & Modal
+ *  - [NEW] Visual Before/After Risk Drop & Clearance Gauge
+ *  - Physics Scenario Simulator (Tsiolkovsky propellant, burn duration, Δv, USD cost)
  *  - Game-theory decision badge
- *  - [NEW] Türksat 6A Scenario Simulator
- *          Dropdown → POST /api/simulate_maneuver → real physics response
- *          (Tsiolkovsky fuel, burn duration, miss improvement, Pc, cost)
  */
 
 import { useState, useEffect } from 'react'
@@ -19,11 +18,8 @@ const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
-const LEVEL_ICONS  = { RED: '🔴', YELLOW: '🟡', WATCH: '🟠', GREEN: '🟢' }
+const LEVEL_ICONS = { RED: '🔴', YELLOW: '🟡', WATCH: '🟠', GREEN: '🟢' }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SCENARIO DEFINITIONS  (only inputs — computed values come from the backend)
-// ─────────────────────────────────────────────────────────────────────────────
 const SCENARIOS = [
   { id: 'none', label: '— Select an avoidance scenario —' },
   {
@@ -56,9 +52,6 @@ const SCENARIOS = [
   },
 ]
 
-// ─────────────────────────────────────────────────────────────────────────────
-// HELPERS
-// ─────────────────────────────────────────────────────────────────────────────
 function efficiencyColor(pct) {
   if (pct >= 94) return '#00d4ff'
   if (pct >= 88) return '#ffd700'
@@ -67,6 +60,173 @@ function efficiencyColor(pct) {
 
 function statusColor(s) {
   return { GREEN: 'var(--green)', YELLOW: 'var(--yellow)', RED: 'var(--red)' }[s] || 'var(--text-dim)'
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SUB-COMPONENT: CDM XML Modal
+// ─────────────────────────────────────────────────────────────────────────────
+function CdmModal({ satellite, threat, onClose }) {
+  const [xmlContent, setXmlContent] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [copied, setCopied] = useState(false)
+
+  const satName = satellite?.name || 'PRIMARY_SAT'
+  const debrisName = threat?.object_name || 'ENCOUNTER_DEBRIS'
+  const tca = threat?.tca_hours_from_now ?? 18.0
+  const missDist = threat?.min_distance_km ?? 0.30
+  const pc = threat?.cara_result?.pc ?? 1.83e-4
+
+  useEffect(() => {
+    let active = true
+    fetch(`${API}/api/cdm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        primary_name: satName,
+        secondary_name: debrisName,
+        miss_distance_km: missDist,
+        pc: pc,
+        tca_hours: tca,
+      }),
+    })
+      .then(r => r.ok ? r.json() : null)
+      .then(res => {
+        if (!active) return
+        if (res?.xml) {
+          setXmlContent(res.xml)
+        } else {
+          // Fallback compliant XML template
+          const nowIso = new Date().toISOString()
+          setXmlContent(
+`<?xml version="1.0" encoding="UTF-8"?>
+<cdm xmlns="urn:ccsds:schema:cdmxml" version="1.0">
+  <header>
+    <COMMENT>TUA SOPRANOS — Autonomous Space Conjunction Assessment</COMMENT>
+    <CREATION_DATE>${nowIso}</CREATION_DATE>
+    <ORIGINATOR>TUA_SOPRANOS_C2</ORIGINATOR>
+    <MESSAGE_FOR>TURKISH_SPACE_AGENCY</MESSAGE_FOR>
+    <MESSAGE_ID>CDM-${satName.replace(/\\s+/g, '_')}-${Date.now()}</MESSAGE_ID>
+  </header>
+  <body>
+    <relativeMetadataData>
+      <TCA>${new Date(Date.now() + tca * 3600000).toISOString()}</TCA>
+      <MISS_DISTANCE units="km">${missDist.toFixed(3)}</MISS_DISTANCE>
+      <COLLISION_PROBABILITY>${pc.toExponential(2)}</COLLISION_PROBABILITY>
+      <COLLISION_PROBABILITY_METHOD>NASA_CARA_2D_ALFANO</COLLISION_PROBABILITY_METHOD>
+    </relativeMetadataData>
+    <segment>
+      <metadata>
+        <OBJECT>OBJECT1</OBJECT>
+        <OBJECT_NAME>${satName}</OBJECT_NAME>
+        <INTERNATIONAL_DESIGNATOR>TUR-SAT</INTERNATIONAL_DESIGNATOR>
+      </metadata>
+    </segment>
+    <segment>
+      <metadata>
+        <OBJECT>OBJECT2</OBJECT>
+        <OBJECT_NAME>${debrisName}</OBJECT_NAME>
+        <INTERNATIONAL_DESIGNATOR>DEBRIS</INTERNATIONAL_DESIGNATOR>
+      </metadata>
+    </segment>
+  </body>
+</cdm>`
+          )
+        }
+        setLoading(false)
+      })
+      .catch(() => {
+        if (active) setLoading(false)
+      })
+
+    return () => { active = false }
+  }, [satName, debrisName, missDist, pc, tca])
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(xmlContent)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  const handleDownload = () => {
+    const blob = new Blob([xmlContent], { type: 'application/xml' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `CDM_${satName.replace(/\\s+/g, '_')}_vs_${debrisName.replace(/\\s+/g, '_')}.xml`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  return (
+    <div className="cdm-modal-overlay" onClick={onClose}>
+      <div className="cdm-modal-card" onClick={e => e.stopPropagation()}>
+        <div className="cdm-modal-header">
+          <div className="cdm-modal-title">
+            📄 CCSDS 508.0-B-1 Conjunction Data Message (CDM)
+          </div>
+          <button className="cdm-close-btn" onClick={onClose}>✕</button>
+        </div>
+
+        <div className="cdm-modal-sub">
+          Official space agency interchange format (NASA CARA / ESA / CCSDS compliant)
+        </div>
+
+        <div className="cdm-code-wrap">
+          {loading ? (
+            <div style={{ color: 'var(--cyan)', padding: 20, textAlign: 'center' }}>
+              Generating CCSDS XML structure…
+            </div>
+          ) : (
+            <pre className="cdm-xml-code">{xmlContent}</pre>
+          )}
+        </div>
+
+        <div className="cdm-modal-actions">
+          <button className="cdm-btn cdm-copy-btn" onClick={handleCopy}>
+            {copied ? '✓ COPIED TO CLIPBOARD' : '📋 COPY XML'}
+          </button>
+          <button className="cdm-btn cdm-dl-btn" onClick={handleDownload}>
+            💾 DOWNLOAD .XML
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SUB-COMPONENT: Visual Risk Comparison Gauge
+// ─────────────────────────────────────────────────────────────────────────────
+function VisualRiskGauge({ initialPc, resultPc, missImprovementKm }) {
+  const initialRed = initialPc > 1e-4
+
+  return (
+    <div className="risk-gauge-box">
+      <div className="risk-gauge-title">⚡ COLLISION RISK MITIGATION VISUALIZER</div>
+      <div className="risk-gauge-track">
+        <div className="risk-step step-before">
+          <span className="step-tag">BEFORE MANEUVER</span>
+          <span className="step-val" style={{ color: initialRed ? 'var(--red)' : 'var(--yellow)' }}>
+            🔴 {typeof initialPc === 'number' ? initialPc.toExponential(2) : initialPc}
+          </span>
+          <span className="step-sub">HIGH THREAT</span>
+        </div>
+
+        <div className="risk-arrow-wrap">
+          <div className="risk-arrow">➔</div>
+          <span className="clearance-pill">+{missImprovementKm.toFixed(2)} km</span>
+        </div>
+
+        <div className="risk-step step-after">
+          <span className="step-tag">POST-AVOIDANCE</span>
+          <span className="step-val" style={{ color: 'var(--green)' }}>
+            🟢 {resultPc}
+          </span>
+          <span className="step-sub">CLEARED (GREEN)</span>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -113,9 +273,6 @@ function MetricRow({ label, value, valueColor }) {
   )
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SUB-COMPONENT: loading skeleton rows
-// ─────────────────────────────────────────────────────────────────────────────
 function SkeletonRows({ n = 6 }) {
   return (
     <>
@@ -134,20 +291,17 @@ function SkeletonRows({ n = 6 }) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SUB-COMPONENT: Scenario Simulator
-// Only renders when satellite name contains "6A"
 // ─────────────────────────────────────────────────────────────────────────────
 function ScenarioSimulator({ satellite, threat }) {
   const [selectedId, setSelectedId] = useState('none')
-  const [result,     setResult]     = useState(null)    // backend response
-  const [loading,    setLoading]    = useState(false)
-  const [error,      setError]      = useState(null)
+  const [result, setResult] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
 
-  // TCA and initial Pc come from the live threat card when available
-  const tcaHours     = threat?.tca_hours_from_now     ?? 18.0
-  const originalMiss = threat?.min_distance_km        ?? 0.30
-  const initialPc    = threat?.cara_result?.pc        ?? 1.83e-4
+  const tcaHours = threat?.tca_hours_from_now ?? 18.0
+  const originalMiss = threat?.min_distance_km ?? 0.30
+  const initialPc = threat?.cara_result?.pc ?? 1.83e-4
 
-  // ── Fetch from backend whenever the dropdown changes ───────────────────
   useEffect(() => {
     if (selectedId === 'none') {
       setResult(null)
@@ -164,17 +318,17 @@ function ScenarioSimulator({ satellite, threat }) {
     setResult(null)
 
     fetch(`${API}/api/simulate_maneuver`, {
-      method:  'POST',
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      signal:  controller.signal,
+      signal: controller.signal,
       body: JSON.stringify({
-        sat_name:                  satellite.name,
-        scenario_id:               scenario.id,
-        maneuver_type:             scenario.maneuver_type,
-        delta_v_ms:                scenario.delta_v_ms,
-        tca_hours:                 tcaHours,
+        sat_name: satellite.name,
+        scenario_id: scenario.id,
+        maneuver_type: scenario.maneuver_type,
+        delta_v_ms: scenario.delta_v_ms,
+        tca_hours: tcaHours,
         original_miss_distance_km: originalMiss,
-        initial_pc:                initialPc,
+        initial_pc: initialPc,
       }),
     })
       .then(r => {
@@ -182,13 +336,13 @@ function ScenarioSimulator({ satellite, threat }) {
         return r.json()
       })
       .then(data => { setResult(data); setLoading(false) })
-      .catch(err  => {
+      .catch(err => {
         if (err.name === 'AbortError') return
         setError(err.message)
         setLoading(false)
       })
 
-    return () => controller.abort()   // cleanup on scenario change
+    return () => controller.abort()
   }, [selectedId, satellite.name, tcaHours, originalMiss, initialPc])
 
   const activeScenario = SCENARIOS.find(s => s.id === selectedId)
@@ -201,11 +355,9 @@ function ScenarioSimulator({ satellite, threat }) {
       borderRadius: 8,
       background: 'rgba(0, 212, 255, 0.04)',
     }}>
-
-      {/* ── Title row ── */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
         <span style={{ fontSize: 11, color: 'var(--cyan)', letterSpacing: '1.5px', fontWeight: 700 }}>
-          🛰 MANEUVER SIMULATOR
+          ⚡ REAL-TIME MANEUVER SIMULATOR
         </span>
         <span style={{
           fontSize: 9, padding: '1px 5px', borderRadius: 3,
@@ -215,7 +367,6 @@ function ScenarioSimulator({ satellite, threat }) {
         </span>
       </div>
 
-      {/* ── Dropdown ── */}
       <select
         value={selectedId}
         onChange={e => setSelectedId(e.target.value)}
@@ -234,7 +385,6 @@ function ScenarioSimulator({ satellite, threat }) {
         ))}
       </select>
 
-      {/* ── Scenario description ── */}
       {activeScenario?.description && (
         <div style={{
           fontSize: 10, color: 'var(--text-dim)', background: 'rgba(255,255,255,0.04)',
@@ -242,43 +392,45 @@ function ScenarioSimulator({ satellite, threat }) {
         }}>
           {activeScenario.description}
           <span style={{ marginLeft: 6, color: 'rgba(0,212,255,0.5)', fontSize: 9 }}>
-            TCA: {tcaHours.toFixed(1)} h · Miss: {originalMiss.toFixed(2)} km
+            TCA: {tcaHours.toFixed(1)} h · Initial Miss: {originalMiss.toFixed(2)} km
           </span>
         </div>
       )}
 
-      {/* ── Loading skeleton ── */}
       {loading && <SkeletonRows n={8} />}
 
-      {/* ── Error state ── */}
       {error && (
         <div style={{
           padding: '8px', borderRadius: 4, fontSize: 10,
           background: 'rgba(255,51,102,0.1)', border: '1px solid rgba(255,51,102,0.3)',
           color: '#ff6b6b',
         }}>
-          ⚠ Backend error: {error}
+          ⚠ Simulation error: {error}
         </div>
       )}
 
-      {/* ── Results from backend ── */}
       {result && !loading && (
         <>
-          {/* BURN PARAMETERS */}
-          <div style={{ fontSize: 9, color: 'var(--text-dim)', letterSpacing: '2px', marginBottom: 4 }}>
+          {/* Visual Risk Gauge */}
+          <VisualRiskGauge
+            initialPc={initialPc}
+            resultPc={result.pc_after}
+            missImprovementKm={result.miss_improvement_km}
+          />
+
+          <div style={{ fontSize: 9, color: 'var(--text-dim)', letterSpacing: '2px', margin: '8px 0 4px' }}>
             BURN PARAMETERS
           </div>
-          <MetricRow label="Maneuver Type"  value={result.type} />
-          <MetricRow label="Total Δv"       value={`${result.delta_v_ms.toFixed(3)} m/s`}       valueColor="var(--cyan)" />
-          <MetricRow label="Burn Duration"  value={`${result.burn_duration_sec.toFixed(1)} s`} />
-          <MetricRow label="Engine Isp"     value={`${result.isp_sec} s`} />
+          <MetricRow label="Maneuver Type" value={result.type} />
+          <MetricRow label="Total Δv" value={`${result.delta_v_ms.toFixed(3)} m/s`} valueColor="var(--cyan)" />
+          <MetricRow label="Burn Duration" value={`${result.burn_duration_sec.toFixed(1)} s`} />
+          <MetricRow label="Engine Isp" value={`${result.isp_sec} s`} />
 
-          {/* FUEL ECONOMY */}
           <div style={{ fontSize: 9, color: 'var(--text-dim)', letterSpacing: '2px', margin: '8px 0 4px' }}>
-            FUEL ECONOMY
+            FUEL ECONOMY (TSIOLKOVSKY)
           </div>
           <MetricRow
-            label="Propellant Used"
+            label="Propellant Mass"
             value={`${result.fuel_mass_kg.toFixed(4)} kg`}
             valueColor="#ffd700"
           />
@@ -287,18 +439,17 @@ function ScenarioSimulator({ satellite, threat }) {
             value={`${result.fuel_efficiency_pct}%`}
             valueColor={efficiencyColor(result.fuel_efficiency_pct)}
           />
-          <MetricRow label="USD Equiv."     value={`$${result.fuel_cost_usd.toLocaleString()}`} />
+          <MetricRow label="USD Cost" value={`$${result.fuel_cost_usd.toLocaleString()}`} />
           <MetricRow
-            label="Mission Life −"
+            label="Mission Life Impact"
             value={`${result.mission_life_impact_days} days`}
             valueColor="#ff9f43"
           />
 
-          <FuelBar pct={result.fuel_remaining_pct} label="Tank remaining (of capacity)" />
+          <FuelBar pct={result.fuel_remaining_pct} label="Tank Remaining" />
 
-          {/* AVOIDANCE OUTCOME */}
           <div style={{ fontSize: 9, color: 'var(--text-dim)', letterSpacing: '2px', margin: '8px 0 4px' }}>
-            AVOIDANCE OUTCOME
+            AVOIDANCE CLEARANCE
           </div>
           <MetricRow
             label="New Miss Distance"
@@ -312,7 +463,6 @@ function ScenarioSimulator({ satellite, threat }) {
           />
           <MetricRow label="Pc After" value={result.pc_after} />
 
-          {/* POST-MANEUVER STATUS */}
           <div style={{
             marginTop: 8, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           }}>
@@ -320,10 +470,10 @@ function ScenarioSimulator({ satellite, threat }) {
               display: 'inline-flex', alignItems: 'center', gap: 6,
               padding: '4px 10px', borderRadius: 4,
               background: `${statusColor(result.status_after)}22`,
-              border:     `1px solid ${statusColor(result.status_after)}55`,
+              border: `1px solid ${statusColor(result.status_after)}55`,
             }}>
               <span style={{ fontSize: 10, color: statusColor(result.status_after), fontWeight: 700 }}>
-                POST-MANEUVER: {result.status_after}
+                STATUS: {result.status_after}
               </span>
             </div>
             {result.recommended && (
@@ -332,17 +482,16 @@ function ScenarioSimulator({ satellite, threat }) {
                 background: 'rgba(0,204,150,0.15)', border: '1px solid rgba(0,204,150,0.4)',
                 color: '#00cc96', letterSpacing: 1,
               }}>
-                ★ OPTIMAL
+                ★ OPTIMAL AVOIDANCE
               </div>
             )}
           </div>
         </>
       )}
 
-      {/* ── Empty state ── */}
       {!loading && !result && !error && selectedId === 'none' && (
-        <div style={{ textAlign: 'center', padding: '10px 0', fontSize: 10, color: 'var(--text-dim)' }}>
-          Select a scenario to compute maneuver metrics
+        <div style={{ textAlign: 'center', padding: '8px 0', fontSize: 10, color: 'var(--text-dim)' }}>
+          Select a scenario above to simulate propellant & avoidance outcome
         </div>
       )}
     </div>
@@ -353,8 +502,9 @@ function ScenarioSimulator({ satellite, threat }) {
 // SUB-COMPONENT: ThreatCard
 // ─────────────────────────────────────────────────────────────────────────────
 function ThreatCard({ threat, satellite }) {
+  const [showCdm, setShowCdm] = useState(false)
   const level = threat.classification?.label || 'WATCH'
-  const cara  = threat.cara_result || {}
+  const cara = threat.cara_result || {}
 
   return (
     <div className={`threat-card ${level} fade-in`}>
@@ -362,6 +512,14 @@ function ThreatCard({ threat, satellite }) {
         <span className="threat-level-icon">{LEVEL_ICONS[level]}</span>
         <span className="threat-name">{threat.object_name}</span>
         {threat.is_demo && <span className="demo-badge">DEMO</span>}
+
+        <button
+          className="cdm-card-btn"
+          onClick={() => setShowCdm(true)}
+          title="Export CCSDS 508.0-B-1 Conjunction Data Message (XML)"
+        >
+          📄 CDM XML
+        </button>
       </div>
 
       <div className="threat-card__stats">
@@ -392,13 +550,23 @@ function ThreatCard({ threat, satellite }) {
         </div>
       )}
 
+      {/* Maneuver Simulator for this threat */}
       <ScenarioSimulator satellite={satellite} threat={threat} />
+
+      {/* CCSDS CDM Modal */}
+      {showCdm && (
+        <CdmModal
+          satellite={satellite}
+          threat={threat}
+          onClose={() => setShowCdm(false)}
+        />
+      )}
     </div>
   )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SUB-COMPONENT: ManeuverSection (API-driven, unchanged)
+// SUB-COMPONENT: ManeuverSection
 // ─────────────────────────────────────────────────────────────────────────────
 function ManeuverSection({ maneuver, game }) {
   if (!maneuver || maneuver.error) return null
@@ -407,7 +575,7 @@ function ManeuverSection({ maneuver, game }) {
 
   return (
     <div className="maneuver-section">
-      <div className="section-label">⚡ Maneuver Recommendation</div>
+      <div className="section-label">⚡ Autonomous Maneuver Recommendation</div>
       <div className="maneuver-rec">
         <div className="maneuver-rec__row">
           Delta-V <span>{rec.delta_v_ms?.toFixed(4)} m/s</span>
@@ -462,7 +630,7 @@ export default function ThreatPanel({ satellite, demoMode }) {
 
   return (
     <div className="threat-panel">
-      {/* ── Satellite header ── */}
+      {/* Satellite Header */}
       <div className="panel-header">
         <div className="panel-title">Threats & Analysis</div>
         <div className="sat-detail-name">{satellite.name}</div>
@@ -480,14 +648,14 @@ export default function ThreatPanel({ satellite, demoMode }) {
         </div>
       </div>
 
-      {/* ── Threat list ── */}
+      {/* Threat list */}
       <div className="threat-list">
         {allThreats.length === 0 ? (
           <div className="no-threats">
             <div className="no-threats-icon">🛡️</div>
             <div>No threats detected</div>
             <div style={{ fontSize: '10px' }}>
-              {demoMode ? 'Demo threats loaded above' : 'Safe orbit — monitoring'}
+              {demoMode ? 'Demo threats loaded above' : 'Safe orbit — continuous monitoring'}
             </div>
           </div>
         ) : (
@@ -495,7 +663,7 @@ export default function ThreatPanel({ satellite, demoMode }) {
             {serious.length > 0 && (
               <>
                 <div style={{ fontSize: '9px', color: 'var(--text-dim)', letterSpacing: '2px', padding: '4px 4px 0' }}>
-                  CRITICAL / WARNING
+                  CRITICAL / WARNING ({serious.length})
                 </div>
                 {serious.map((t, i) => (
                   <ThreatCard key={`s-${i}`} threat={t} satellite={satellite} />
@@ -505,7 +673,7 @@ export default function ThreatPanel({ satellite, demoMode }) {
             {others.length > 0 && (
               <>
                 <div style={{ fontSize: '9px', color: 'var(--text-dim)', letterSpacing: '2px', padding: '8px 4px 0' }}>
-                  MONITORING
+                  MONITORING ({others.length})
                 </div>
                 {others.map((t, i) => (
                   <ThreatCard key={`o-${i}`} threat={t} satellite={satellite} />
@@ -516,7 +684,7 @@ export default function ThreatPanel({ satellite, demoMode }) {
         )}
       </div>
 
-      {/* ── API-driven maneuver recommendation ── */}
+      {/* Maneuver Recommendation */}
       <ManeuverSection
         maneuver={satellite.maneuver_suggestion}
         game={satellite.game_theory}

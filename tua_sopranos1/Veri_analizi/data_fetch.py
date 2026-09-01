@@ -2,19 +2,43 @@
 # YÖRÜNGE KALKANI — VERİ ÇEKME MOTORU
 # ============================================
 
+import sys
+import os
 import requests
 import json
-import os
 import datetime
 import numpy as np
-from sgp4.api import Satrec, jday
-from config import (
-    SPACETRACK_USER, SPACETRACK_PASS,
-    TURKISH_SATELLITES, DEBRIS_FILTERS,
-    COVARIANCE_PARAMS, EARTH_RADIUS_KM
-)
 
-CACHE_DIR = "cache"
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if _BASE_DIR not in sys.path:
+    sys.path.insert(0, _BASE_DIR)
+
+from sgp4.api import Satrec, jday
+try:
+    from .config import (
+        SPACETRACK_USER, SPACETRACK_PASS,
+        TURKISH_SATELLITES, DEBRIS_FILTERS,
+        COVARIANCE_PARAMS, EARTH_RADIUS_KM
+    )
+except ImportError:
+    from config import (
+        SPACETRACK_USER, SPACETRACK_PASS,
+        TURKISH_SATELLITES, DEBRIS_FILTERS,
+        COVARIANCE_PARAMS, EARTH_RADIUS_KM
+    )
+
+CACHE_DIR = os.path.join(_BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 
@@ -31,23 +55,32 @@ class SpaceTrackClient:
         self.session = requests.Session()
         self._logged_in = False
 
-    def login(self):
-        resp = self.session.post(self.LOGIN_URL, data={
-            "identity": SPACETRACK_USER,
-            "password": SPACETRACK_PASS
-        })
-        self._logged_in = resp.status_code == 200
-        return self._logged_in
+    def login(self, timeout: float = 10.0):
+        try:
+            resp = self.session.post(
+                self.LOGIN_URL,
+                data={
+                    "identity": SPACETRACK_USER,
+                    "password": SPACETRACK_PASS,
+                },
+                timeout=timeout,
+            )
+            self._logged_in = (resp.status_code == 200)
+            return self._logged_in
+        except Exception as e:
+            self._logged_in = False
+            return False
 
-    def query(self, endpoint):
+    def query(self, endpoint, timeout: float = 20.0):
         if not self._logged_in:
-            self.login()
-        resp = self.session.get(f"{self.QUERY_URL}/{endpoint}")
-        if resp.status_code == 200 and resp.text.strip():
-            try:
-                return resp.json()
-            except:
+            if not self.login():
                 return []
+        try:
+            resp = self.session.get(f"{self.QUERY_URL}/{endpoint}", timeout=timeout)
+            if resp.status_code == 200 and resp.text.strip():
+                return resp.json()
+        except Exception:
+            return []
         return []
 
 
@@ -451,37 +484,63 @@ def refresh_cache(client=None):
     return True
 
 
-# ============================================
-# 10. ANA VERİ YÜKLEYİCİ
-# ============================================
+def load_all_data(use_cache: bool = True, max_age_hours: float = 24.0):
+    """
+    Tüm uydu ve çöp verilerini yükler (Canlı API / Akıllı Önbellek).
 
-def load_all_data(use_cache=False):
-    """Tüm veriyi yükler — cache varsa oradan, yoksa API'den"""
+    Mantık:
+      1. use_cache=True ise ve diskteki cache dosyası max_age_hours (varsayılan 24 saat)
+         süresinden yeniyse, anında diskten yükler.
+      2. Cache 24 saatten eskiyse veya use_cache=False ise, otomatik olarak
+         Space-Track API'ye bağlanıp en güncel TLE'leri çeker ve cache'i günceller.
+      3. İnternet yoksa veya Space-Track bağlantısı başarısız olursa,
+         sistem çökmek yerine mevcut en son cache'e güvenli şekilde geri döner (fallback).
+    """
+    cache_file = os.path.join(CACHE_DIR, "turkish_tle.json")
+    cache_fresh = False
+    age_hours = 999.0
 
-    if use_cache:
+    if os.path.exists(cache_file):
+        try:
+            mtime = os.path.getmtime(cache_file)
+            age_hours = (datetime.datetime.now().timestamp() - mtime) / 3600.0
+            cache_fresh = (age_hours < max_age_hours)
+        except Exception:
+            cache_fresh = False
+
+    # 1. Taze cache varsa kullan
+    if use_cache and cache_fresh:
         turkish = load_cache("turkish_tle.json")
         geo_debris = load_cache("geo_debris.json")
         leo_debris = load_cache("leo_debris.json")
         if turkish and geo_debris and leo_debris:
-            print("📂 Cache'ten yüklendi")
+            print(f"📂 Cache'ten yüklendi (Son güncelleme: {age_hours:.1f} saat önce)")
             return turkish, geo_debris, leo_debris
-        print("⚠️ Cache eksik, API'ye geçiliyor...")
 
+    # 2. Canlı API'den çekmeyi dene
+    print(f"📡 Space-Track API bağlantısı kuruluyor (Cache yaşı: {age_hours:.1f} saat)...")
     client = SpaceTrackClient()
-    if not client.login():
-        print("❌ Login başarısız! Cache deneniyor...")
-        return load_all_data(use_cache=True)
+    if client.login():
+        turkish = fetch_all_turkish_tle(client)
+        geo_debris = fetch_debris(client, "GEO")
+        leo_debris = fetch_debris(client, "LEO")
 
-    turkish = fetch_all_turkish_tle(client)
-    geo_debris = fetch_debris(client, "GEO")
-    leo_debris = fetch_debris(client, "LEO")
+        if turkish and geo_debris and leo_debris:
+            save_cache(turkish, "turkish_tle.json")
+            save_cache(geo_debris, "geo_debris.json")
+            save_cache(leo_debris, "leo_debris.json")
+            print("✅ Canlı TLE verileri Space-Track'ten başarıyla güncellendi!")
+            return turkish, geo_debris, leo_debris
 
-    # Otomatik cache'le
-    save_cache(turkish, "turkish_tle.json")
-    save_cache(geo_debris, "geo_debris.json")
-    save_cache(leo_debris, "leo_debris.json")
+    # 3. Fallback: API başarısızsa mevcut cache'e dön
+    print("⚠️ Space-Track canlı bağlantı sağlanamadı, mevcut cache kullanılıyor...")
+    turkish = load_cache("turkish_tle.json")
+    geo_debris = load_cache("geo_debris.json")
+    leo_debris = load_cache("leo_debris.json")
+    if turkish and geo_debris and leo_debris:
+        return turkish, geo_debris, leo_debris
 
-    return turkish, geo_debris, leo_debris
+    raise RuntimeError("Ne canlı veri ne de önbellek dosyası bulunabildi!")
 
 
 # ============================================
